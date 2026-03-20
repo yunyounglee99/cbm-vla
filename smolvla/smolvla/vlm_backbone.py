@@ -69,6 +69,13 @@ class SmolVLMBackbone(nn.Module):
         # Get hidden dimension from language model
         self.hidden_dim = self.config.text_config.hidden_size
         
+        # [FIX] Pre-register adaptive pool as a proper submodule.
+        # Previously: created dynamically via hasattr() check in _adaptive_reduce().
+        # Problem: Dynamically created nn.Linear was not tracked by Module system,
+        #          so weights were silently dropped from state_dict().
+        # Fix: Register with a reasonable default size; resize if needed.
+        self._adaptive_pool = None  # Will be registered on first use via _get_adaptive_pool()
+        
         # Freeze VLM if specified (for efficiency during action expert training)
         if freeze_vlm:
             self._freeze_vlm()
@@ -94,7 +101,7 @@ class SmolVLMBackbone(nn.Module):
         visual_features: torch.Tensor
     ) -> torch.Tensor:
         """
-        Reduce visual tokens using pixel shuffle
+        Reduce visual tokens using spatial pooling
         
         Args:
             visual_features: [batch_size, num_tokens, hidden_dim]
@@ -125,28 +132,59 @@ class SmolVLMBackbone(nn.Module):
             batch_size, spatial_size, spatial_size, hidden_dim
         )
         
-        # Pixel shuffle reduction
-        # [B, H, W, D] -> [B, H//r, W//r, D*r*r]
+        # Spatial reduction via average pooling
         r = int(reduction_factor ** 0.5)
+        if r < 1:
+            return self._adaptive_reduce(visual_features)
+        
         h_new, w_new = spatial_size // r, spatial_size // r
         
-        # Reshape and reduce
-        features_reduced = features_2d.unfold(1, r, r).unfold(2, r, r)
-        # [B, h_new, w_new, D, r, r]
-        features_reduced = features_reduced.contiguous().view(
-            batch_size, h_new, w_new, hidden_dim, r * r
+        # Use avg_pool2d for clean spatial reduction
+        # [B, H, W, D] -> [B, D, H, W]
+        features_permuted = features_2d.permute(0, 3, 1, 2)
+        features_reduced = torch.nn.functional.avg_pool2d(
+            features_permuted, kernel_size=r, stride=r
         )
-        
-        # Average pooling over spatial groups
-        features_reduced = features_reduced.mean(dim=-1)
-        
-        # Flatten spatial dimensions
-        # [B, h_new, w_new, D] -> [B, h_new*w_new, D]
-        features_reduced = features_reduced.view(
-            batch_size, h_new * w_new, hidden_dim
-        )
+        # [B, D, H', W'] -> [B, H'*W', D]
+        features_reduced = features_reduced.flatten(2).transpose(1, 2)
         
         return features_reduced
+    
+    def _get_adaptive_pool(
+        self,
+        num_tokens: int,
+        device: torch.device,
+    ) -> nn.Linear:
+        """
+        [FIX] Get or create adaptive pool layer as a registered submodule.
+        
+        Previously: Used hasattr() to check and dynamically assign nn.Linear.
+        Problem: The layer was never registered as a submodule, so:
+          1. state_dict() didn't include its weights
+          2. .to(device) didn't move it
+          3. Save/load silently lost trained weights
+        
+        Fix: Use register_module() for proper tracking.
+        """
+        if (self._adaptive_pool is None 
+                or self._adaptive_pool.in_features != num_tokens):
+            pool = nn.Linear(num_tokens, self.visual_tokens_per_image).to(device)
+            # Initialize with averaging weights
+            with torch.no_grad():
+                pool.weight.zero_()
+                ratio = num_tokens / self.visual_tokens_per_image
+                for i in range(self.visual_tokens_per_image):
+                    start = int(i * ratio)
+                    end = min(int((i + 1) * ratio), num_tokens)
+                    if end > start:
+                        pool.weight[i, start:end] = 1.0 / (end - start)
+                if pool.bias is not None:
+                    pool.bias.zero_()
+            # Register as submodule so it appears in state_dict
+            self._adaptive_pool = pool
+            # Force re-registration
+            self.register_module('_adaptive_pool', pool)
+        return self._adaptive_pool
     
     def _adaptive_reduce(
         self, 
@@ -154,6 +192,8 @@ class SmolVLMBackbone(nn.Module):
     ) -> torch.Tensor:
         """
         Adaptive pooling for non-square token arrangements
+        
+        [FIX] Now uses _get_adaptive_pool() which properly registers the layer.
         
         Args:
             visual_features: [batch_size, num_tokens, hidden_dim]
@@ -163,58 +203,14 @@ class SmolVLMBackbone(nn.Module):
         """
         batch_size, num_tokens, hidden_dim = visual_features.shape
         
-        # Use learned linear projection as fallback
-        if not hasattr(self, '_adaptive_pool'):
-            self._adaptive_pool = nn.Linear(
-                num_tokens, 
-                self.visual_tokens_per_image
-            ).to(visual_features.device)
+        pool = self._get_adaptive_pool(num_tokens, visual_features.device)
         
-        # [B, N, D] -> [B, D, N]
+        # [B, N, D] -> [B, D, N] -> [B, D, target_N] -> [B, target_N, D]
         features_transposed = visual_features.transpose(1, 2)
-        
-        # [B, D, N] -> [B, D, target_N]
-        reduced = self._adaptive_pool(features_transposed)
-        
-        # [B, D, target_N] -> [B, target_N, D]
+        reduced = pool(features_transposed)
         reduced = reduced.transpose(1, 2)
         
         return reduced
-    
-    def forward_vision_encoder(
-        self,
-        images: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Process images through vision encoder
-        
-        Args:
-            images: [batch_size, num_images, channels, height, width]
-            
-        Returns:
-            visual_features: [batch_size, num_images, num_visual_tokens, hidden_dim]
-        """
-        batch_size, num_images = images.shape[:2]
-        
-        # Flatten batch and num_images for processing
-        # [B, N_img, C, H, W] -> [B*N_img, C, H, W]
-        images_flat = images.view(-1, *images.shape[2:])
-        
-        # Process through vision encoder
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-            vision_outputs = self.vlm.vision_model(images_flat)
-            visual_features_flat = vision_outputs.last_hidden_state
-        
-        # Reduce visual tokens
-        visual_features_flat = self._reduce_visual_tokens(visual_features_flat)
-        
-        # Reshape back to [B, N_img, N_tokens, D]
-        num_tokens = visual_features_flat.shape[1]
-        visual_features = visual_features_flat.view(
-            batch_size, num_images, num_tokens, self.hidden_dim
-        )
-        
-        return visual_features
     
     def prepare_inputs(
         self,
@@ -260,61 +256,127 @@ class SmolVLMBackbone(nn.Module):
     ) -> Tuple[torch.Tensor, Dict]:
         """
         Forward pass with layer skipping
+        
+        [FIX] Multi-<image> token handling:
+        
+        Original bug: Only image_positions[0] was used, meaning only the first
+        <image> token was replaced with visual features. When the chat template
+        generates multiple <image> placeholders (one per camera view), the
+        remaining <image> tokens stayed as raw text embeddings in the sequence.
+        
+        Fix: Replace ALL <image> tokens with the corresponding visual features.
+        Strategy: 
+          - Find all <image> token positions
+          - Remove all <image> embeddings from the text sequence  
+          - Insert the full visual feature block at the position of the first
+            <image> token (since visual_features is already flattened from
+            all views by the caller in smolvla.py)
+        
+        This ensures the visual features correctly replace the placeholder
+        tokens regardless of how many <image> tokens the template generates.
         """
         batch_size = input_ids.shape[0]
         
         # Flatten visual features
         # [B, N_img, N_tokens, D] -> [B, N_img*N_tokens, D]
-        num_images, num_visual_tokens = visual_features.shape[1:3]
-        visual_features_flat = visual_features.view(
-            batch_size, num_images * num_visual_tokens, self.hidden_dim
-        )
+        if visual_features.dim() == 4:
+            num_images, num_visual_tokens = visual_features.shape[1:3]
+            visual_features_flat = visual_features.view(
+                batch_size, num_images * num_visual_tokens, self.hidden_dim
+            )
+        else:
+            # Already [B, total_visual_tokens, D]
+            visual_features_flat = visual_features
 
         text_embeds = self.vlm.language_model.model.embed_tokens(input_ids)
         
-        # Get text embeddings
+        # Get <image> token ID
         image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<image>")
         
         new_inputs_embeds = []
         new_attention_masks = []
         
         for i in range(batch_size):
-            # <image> 토큰의 위치 인덱스 찾기
-            image_positions = (input_ids[i] == image_token_id).nonzero(as_tuple=True)[0]
+            # [FIX] Find ALL <image> token positions, not just the first one
+            image_mask = (input_ids[i] == image_token_id)
+            image_positions = image_mask.nonzero(as_tuple=True)[0]
             
-            # 이미지가 존재하고, <image> 토큰이 텍스트에 포함되어 있는 경우
             if len(image_positions) > 0 and visual_features_flat is not None:
-                start_idx = image_positions[0]
                 num_vis_tokens = visual_features_flat.shape[1]
                 
-                # 1. <image> 토큰을 제외하고 앞뒤 텍스트 자르기
-                pre_embeds = text_embeds[i, :start_idx]
-                post_embeds = text_embeds[i, start_idx+1:]
+                # [FIX] Build the merged embedding by:
+                # 1. Taking text before the first <image> token
+                # 2. Inserting ALL visual features
+                # 3. Taking text after the last <image> token
+                # This removes ALL <image> placeholder tokens and replaces
+                # them with the actual visual feature block.
                 
-                # 2. 중간에 시각적 특성(Visual features) 삽입
+                first_img_pos = image_positions[0].item()
+                last_img_pos = image_positions[-1].item()
+                
+                # Text before first <image>
+                pre_embeds = text_embeds[i, :first_img_pos]
+                
+                # Text after last <image> (skip all <image> tokens)
+                post_embeds = text_embeds[i, last_img_pos + 1:]
+                
+                # Visual features replace all <image> tokens
                 vis_embeds = visual_features_flat[i]
+                
                 merged_embeds = torch.cat([pre_embeds, vis_embeds, post_embeds], dim=0)
                 new_inputs_embeds.append(merged_embeds)
                 
-                # 3. 늘어난 토큰 수만큼 Attention Mask도 확장
-                pre_mask = attention_mask[i, :start_idx]
-                vis_mask = torch.ones(num_vis_tokens, dtype=attention_mask.dtype, device=attention_mask.device)
-                post_mask = attention_mask[i, start_idx+1:]
+                # Build matching attention mask
+                pre_mask = attention_mask[i, :first_img_pos]
+                vis_mask = torch.ones(
+                    num_vis_tokens, 
+                    dtype=attention_mask.dtype, 
+                    device=attention_mask.device
+                )
+                post_mask = attention_mask[i, last_img_pos + 1:]
                 
                 merged_mask = torch.cat([pre_mask, vis_mask, post_mask], dim=0)
                 new_attention_masks.append(merged_mask)
             else:
                 new_inputs_embeds.append(text_embeds[i])
                 new_attention_masks.append(attention_mask[i])
-                
-        # 리스트에 모은 텐서들을 다시 Batch 형태로 스택
-        inputs_embeds = torch.stack(new_inputs_embeds)
-        extended_attention_mask = torch.stack(new_attention_masks)
+        
+        # [FIX] Pad sequences to the same length within the batch.
+        # After replacing <image> tokens (potentially different counts per sample),
+        # sequence lengths may differ. Pad to max length for batched processing.
+        max_len = max(e.shape[0] for e in new_inputs_embeds)
+        
+        padded_embeds = []
+        padded_masks = []
+        for embeds, mask in zip(new_inputs_embeds, new_attention_masks):
+            seq_len = embeds.shape[0]
+            if seq_len < max_len:
+                pad_len = max_len - seq_len
+                embed_pad = torch.zeros(
+                    pad_len, embeds.shape[1],
+                    dtype=embeds.dtype, device=embeds.device
+                )
+                mask_pad = torch.zeros(
+                    pad_len,
+                    dtype=mask.dtype, device=mask.device
+                )
+                padded_embeds.append(torch.cat([embeds, embed_pad], dim=0))
+                padded_masks.append(torch.cat([mask, mask_pad], dim=0))
+            else:
+                padded_embeds.append(embeds)
+                padded_masks.append(mask)
+        
+        inputs_embeds = torch.stack(padded_embeds)
+        extended_attention_mask = torch.stack(padded_masks)
                 
         # State Feature는 모델이 일관성을 가지도록 텍스트 임베딩 맨 앞에 부착
         if state_features is not None:
             inputs_embeds = torch.cat([state_features, inputs_embeds], dim=1)
-            state_mask = torch.ones(batch_size, 1, dtype=extended_attention_mask.dtype, device=extended_attention_mask.device)
+            state_mask = torch.ones(
+                batch_size, state_features.shape[1],
+                dtype=extended_attention_mask.dtype,
+                device=extended_attention_mask.device
+            )
             extended_attention_mask = torch.cat([state_mask, extended_attention_mask], dim=1)
         
         outputs = self.vlm.language_model.model(
@@ -328,6 +390,7 @@ class SmolVLMBackbone(nn.Module):
         outputs_dict = {
             'last_hidden_state': hidden_states,
             'layer_idx': self.use_layers,
+            'attention_mask': extended_attention_mask,  # Return for downstream use
         }
         
         return hidden_states, outputs_dict
@@ -343,6 +406,12 @@ class SmolVLMBackbone(nn.Module):
         """
         Main forward pass
         
+        [NOTE] This method includes its own vision encoding via forward_vision_encoder().
+        However, in the main SmolVLA pipeline (smolvla.py), vision encoding is handled
+        by the separate VisionEncoder class, and this method's forward_vision_encoder()
+        is NOT called. Use forward_with_layer_skipping() directly when visual_features
+        are already computed externally.
+        
         Args:
             images: [batch_size, num_images, channels, height, width]
             input_ids: [batch_size, seq_len]
@@ -355,7 +424,7 @@ class SmolVLMBackbone(nn.Module):
             outputs_dict: Optional dictionary with additional outputs
         """
         # Process images through vision encoder
-        visual_features = self.forward_vision_encoder(images)
+        visual_features = self._forward_vision_encoder(images)
         
         # Forward with layer skipping
         vlm_features, outputs_dict = self.forward_with_layer_skipping(
@@ -369,6 +438,47 @@ class SmolVLMBackbone(nn.Module):
             return vlm_features, outputs_dict
         else:
             return vlm_features
+    
+    def _forward_vision_encoder(
+        self,
+        images: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Process images through the VLM's internal vision encoder.
+        
+        [FIX] Renamed from forward_vision_encoder() to _forward_vision_encoder()
+        to indicate this is an internal/private method. The public VisionEncoder
+        class in vision_encoder.py is the primary way to encode images in the
+        SmolVLA pipeline. This method exists only for the self-contained
+        forward() path and should not be called directly by external code.
+        
+        Args:
+            images: [batch_size, num_images, channels, height, width]
+            
+        Returns:
+            visual_features: [batch_size, num_images, num_visual_tokens, hidden_dim]
+        """
+        batch_size, num_images = images.shape[:2]
+        
+        # Flatten batch and num_images for processing
+        # [B, N_img, C, H, W] -> [B*N_img, C, H, W]
+        images_flat = images.view(-1, *images.shape[2:])
+        
+        # Process through vision encoder
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            vision_outputs = self.vlm.vision_model(images_flat)
+            visual_features_flat = vision_outputs.last_hidden_state
+        
+        # Reduce visual tokens
+        visual_features_flat = self._reduce_visual_tokens(visual_features_flat)
+        
+        # Reshape back to [B, N_img, N_tokens, D]
+        num_tokens = visual_features_flat.shape[1]
+        visual_features = visual_features_flat.view(
+            batch_size, num_images, num_tokens, self.hidden_dim
+        )
+        
+        return visual_features
     
     def get_hidden_dim(self) -> int:
         """Get hidden dimension of VLM"""

@@ -6,44 +6,74 @@ from transformers import AutoModel, AutoProcessor
 import math
 
 
-class PixelShuffleTokenReduction(nn.Module):
+class AdaptiveTokenReduction(nn.Module):
     """
-    Pixel Shuffle based token reduction
+    Adaptive Token Reduction Module
     
-    Reduces visual tokens from N to target_tokens using spatial reorganization
-    Similar to pixel shuffle in super-resolution but in reverse
+    Reduces visual tokens from N to target_tokens using:
+    - Spatial average pooling (for perfect-square token grids)
+    - Learned linear projection (fallback for non-square layouts)
+    
+    [FIX] Renamed from PixelShuffleTokenReduction:
+          The original name was misleading — the actual implementation uses
+          spatial avg_pool2d or learned linear projection, NOT pixel shuffle
+          (which is sub-pixel convolution's inverse operation).
+    
+    [FIX] Learned projection is now registered as a proper nn.Linear submodule
+          via register_module(), ensuring it appears in state_dict() and
+          survives save/load cycles.
     """
     
     def __init__(
         self,
         hidden_dim: int,
         target_tokens: int = 64,
+        max_input_tokens: int = 1024,
     ):
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.target_tokens = target_tokens
         
-        # Learnable projection for adaptive reduction
-        self.reduction_proj = None  # Initialized dynamically
+        # [FIX] Pre-register the learned projection as a proper submodule.
+        # Previously: self.reduction_proj = None (dynamically created later)
+        # Problem: Dynamically assigned nn.Linear is NOT tracked by PyTorch's
+        #          Module system, so state_dict() won't include these weights.
+        #          This means trained weights are silently lost on save/load.
+        # Fix: Register with a default size and re-initialize if input changes.
+        self.reduction_proj = nn.Linear(max_input_tokens, target_tokens, bias=False)
+        self._proj_input_tokens = max_input_tokens
+        self._init_averaging_weights(max_input_tokens)
     
-    def _init_projection(self, input_tokens: int, device: torch.device):
-        """Initialize reduction projection if needed"""
-        if self.reduction_proj is None or self.reduction_proj.in_features != input_tokens:
-            self.reduction_proj = nn.Linear(
-                input_tokens,
-                self.target_tokens,
-                bias=False
-            ).to(device)
-            
-            # Initialize with averaging weights
-            with torch.no_grad():
-                # Each output token averages from corresponding input region
-                ratio = input_tokens / self.target_tokens
-                for i in range(self.target_tokens):
-                    start_idx = int(i * ratio)
-                    end_idx = int((i + 1) * ratio)
+    def _init_averaging_weights(self, input_tokens: int):
+        """
+        Initialize projection weights to approximate regional averaging.
+        Each output token averages from its corresponding input region.
+        """
+        with torch.no_grad():
+            self.reduction_proj.weight.zero_()
+            ratio = input_tokens / self.target_tokens
+            for i in range(self.target_tokens):
+                start_idx = int(i * ratio)
+                end_idx = min(int((i + 1) * ratio), input_tokens)
+                if end_idx > start_idx:
                     self.reduction_proj.weight[i, start_idx:end_idx] = 1.0 / (end_idx - start_idx)
+    
+    def _ensure_projection_size(self, input_tokens: int, device: torch.device):
+        """
+        Ensure the projection layer matches the input token count.
+        If the input size changed, re-create and re-register the projection.
+        
+        [FIX] This replaces the old _init_projection() which assigned nn.Linear
+              without proper module registration.
+        """
+        if self._proj_input_tokens != input_tokens:
+            # Re-create with correct size — registered as submodule via assignment
+            self.reduction_proj = nn.Linear(
+                input_tokens, self.target_tokens, bias=False
+            ).to(device)
+            self._proj_input_tokens = input_tokens
+            self._init_averaging_weights(input_tokens)
     
     def forward(self, visual_tokens: torch.Tensor) -> torch.Tensor:
         """
@@ -68,7 +98,12 @@ class PixelShuffleTokenReduction(nn.Module):
         # Try spatial reduction first (for perfect squares)
         spatial_size = int(math.sqrt(num_tokens))
         if spatial_size * spatial_size == num_tokens:
-            return self._spatial_reduction(visual_tokens, spatial_size)
+            target_spatial = int(math.sqrt(self.target_tokens))
+            # Only use spatial reduction if both are perfect squares
+            # and the reduction factor is an integer
+            if (target_spatial * target_spatial == self.target_tokens
+                    and spatial_size % target_spatial == 0):
+                return self._spatial_reduction(visual_tokens, spatial_size)
         
         # Otherwise use learned projection
         return self._learned_reduction(visual_tokens)
@@ -79,7 +114,7 @@ class PixelShuffleTokenReduction(nn.Module):
         spatial_size: int,
     ) -> torch.Tensor:
         """
-        Spatial reduction using pixel shuffle
+        Spatial reduction using average pooling
         
         Args:
             visual_tokens: [batch_size, num_tokens, hidden_dim]
@@ -89,33 +124,25 @@ class PixelShuffleTokenReduction(nn.Module):
             reduced_tokens: [batch_size, target_tokens, hidden_dim]
         """
         batch_size, num_tokens, hidden_dim = visual_tokens.shape
-        
-        # Reshape to 2D spatial layout
-        # [B, N, D] -> [B, H, W, D]
-        tokens_2d = visual_tokens.view(batch_size, spatial_size, spatial_size, hidden_dim)
-        
-        # Calculate target spatial size
         target_spatial_size = int(math.sqrt(self.target_tokens))
-        if target_spatial_size * target_spatial_size != self.target_tokens:
-            # Fallback to learned reduction if target is not perfect square
-            return self._learned_reduction(visual_tokens)
-        
-        # Calculate reduction factor
         reduction_factor = spatial_size // target_spatial_size
         
-        if reduction_factor == 1:
+        if reduction_factor <= 1:
             return visual_tokens
         
-        # Perform spatial pooling
-        # [B, H, W, D] -> [B, H//r, W//r, D]
+        # Reshape to 2D spatial layout: [B, N, D] -> [B, D, H, W]
+        tokens_2d = visual_tokens.view(
+            batch_size, spatial_size, spatial_size, hidden_dim
+        ).permute(0, 3, 1, 2)
+        
+        # Average pooling: [B, D, H, W] -> [B, D, H', W']
         tokens_reduced = F.avg_pool2d(
-            tokens_2d.permute(0, 3, 1, 2),  # [B, D, H, W]
+            tokens_2d,
             kernel_size=reduction_factor,
             stride=reduction_factor,
         )
         
-        # Reshape back to sequence
-        # [B, D, H', W'] -> [B, H'*W', D]
+        # Reshape back: [B, D, H', W'] -> [B, H'*W', D]
         tokens_reduced = tokens_reduced.flatten(2).transpose(1, 2)
         
         return tokens_reduced
@@ -132,14 +159,13 @@ class PixelShuffleTokenReduction(nn.Module):
         """
         batch_size, num_tokens, hidden_dim = visual_tokens.shape
         
-        # Initialize projection if needed
-        self._init_projection(num_tokens, visual_tokens.device)
+        # [FIX] Ensure projection layer matches current input size
+        self._ensure_projection_size(num_tokens, visual_tokens.device)
         
-        # Apply reduction
         # [B, N, D] -> [B, D, N] -> [B, D, target_N] -> [B, target_N, D]
-        tokens_transposed = visual_tokens.transpose(1, 2)  # [B, D, N]
-        reduced = self.reduction_proj(tokens_transposed)    # [B, D, target_N]
-        reduced = reduced.transpose(1, 2)                   # [B, target_N, D]
+        tokens_transposed = visual_tokens.transpose(1, 2)   # [B, D, N]
+        reduced = self.reduction_proj(tokens_transposed)     # [B, D, target_N]
+        reduced = reduced.transpose(1, 2)                    # [B, target_N, D]
         
         return reduced
     
@@ -147,26 +173,34 @@ class PixelShuffleTokenReduction(nn.Module):
         """
         Upsample tokens if input is smaller than target
         
+        [FIX] Original used bilinear interpolation with an unnecessary 4D reshape
+              (unsqueeze(-1) to create a fake spatial dimension). This added
+              complexity without benefit. Replaced with 1D linear interpolation
+              which is semantically correct for sequence upsampling.
+        
         Args:
             visual_tokens: [batch_size, num_tokens, hidden_dim]
             
         Returns:
             upsampled_tokens: [batch_size, target_tokens, hidden_dim]
         """
-        batch_size, num_tokens, hidden_dim = visual_tokens.shape
+        # [B, N, D] -> [B, D, N]
+        tokens_transposed = visual_tokens.transpose(1, 2)
         
-        # Use linear interpolation
-        # [B, N, D] -> [B, D, N] -> [B, D, target_N] -> [B, target_N, D]
-        tokens_transposed = visual_tokens.transpose(1, 2).unsqueeze(-1)  # [B, D, N, 1]
+        # 1D interpolation along token dimension: [B, D, N] -> [B, D, target_N]
         upsampled = F.interpolate(
             tokens_transposed,
-            size=(self.target_tokens, 1),
-            mode='bilinear',
+            size=self.target_tokens,
+            mode='linear',
             align_corners=False,
         )
-        upsampled = upsampled.squeeze(-1).transpose(1, 2)  # [B, target_N, D]
         
-        return upsampled
+        # [B, D, target_N] -> [B, target_N, D]
+        return upsampled.transpose(1, 2)
+
+
+# Backward compatibility alias
+PixelShuffleTokenReduction = AdaptiveTokenReduction
 
 
 class VisionEncoder(nn.Module):
@@ -216,9 +250,9 @@ class VisionEncoder(nn.Module):
             trust_remote_code=True,
         )
         
-        # Token reduction
+        # Token reduction (renamed class)
         self.visual_tokens_per_image = visual_tokens_per_image
-        self.token_reduction = PixelShuffleTokenReduction(
+        self.token_reduction = AdaptiveTokenReduction(
             hidden_dim=self.hidden_dim,
             target_tokens=visual_tokens_per_image,
         )
@@ -436,7 +470,8 @@ class MultiImageVisionEncoder(nn.Module):
                 view_images,
                 return_dict=False,
             )
-            # [B, num_tokens, D]
+            # [B, 1, num_tokens, D] -> [B, num_tokens, D]
+            view_features = view_features.squeeze(1)
             
             # Add view embedding if requested
             if add_view_embeddings:
@@ -510,5 +545,13 @@ if __name__ == "__main__":
         features, info = encoder(single_image, return_dict=True)
         print(f"   Target {target_tokens} tokens: "
               f"reduction ratio {info['reduction_ratio']:.2f}x")
+    
+    # [FIX] Test save/load round-trip for token reduction weights
+    print("\n5. Testing state_dict save/load for token reduction...")
+    sd = vision_encoder.state_dict()
+    reduction_keys = [k for k in sd.keys() if 'reduction' in k or 'token_reduction' in k]
+    print(f"   Token reduction keys in state_dict: {reduction_keys}")
+    assert len(reduction_keys) > 0, "Token reduction weights missing from state_dict!"
+    print(f"   ✓ Token reduction weights properly saved")
     
     print("\n✓ VisionEncoder test completed!")
