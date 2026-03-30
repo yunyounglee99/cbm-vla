@@ -13,17 +13,17 @@ discriminability와 diversity를 최대화하는 컨셉 부분집합을 선택�
 CBM-VLA에서는 LaBo의 "정신"(자동 컨셉 선택)을 따르되, 방법은 다릅니다:
   
   1. Embedding 기반 클러스터링 (LaBo의 submodular selection 대체)
-     - T5 encoder로 모든 raw concept 문장을 임베딩
-     - Cosine similarity 기반 클러스터링
-     - 클러스터 중심에 가장 가까운 문장을 대표 컨셉으로 선택
-     
+    - T5 encoder로 모든 raw concept 문장을 임베딩
+    - Cosine similarity 기반 클러스터링
+    - 클러스터 중심에 가장 가까운 문장을 대표 컨셉으로 선택
+    
   2. 빈도 기반 필터링 (LaBo에는 없는 추가 단계)
-     - 너무 드문 컨셉(<5회 출현)은 노이즈로 간주하여 제거
-     - 너무 흔한 컨셉(>80% 에피소드)은 정보량이 적어 제거 후보
-     
+    - 너무 드문 컨셉(<5회 출현)은 노이즈로 간주하여 제거
+    - 너무 흔한 컨셉(>80% 에피소드)은 정보량이 적어 제거 후보
+    
   3. 수동 검증 옵션 (LaBo의 human evaluation과 유사)
-     - 최종 컨셉 풀을 출력하여 연구자가 검토 가능
-     - 의미적으로 부적절한 컨셉을 수동으로 교체/제거
+    - 최종 컨셉 풀을 출력하여 연구자가 검토 가능
+    - 의미적으로 부적절한 컨셉을 수동으로 교체/제거
 
 로봇 도메인에서 submodular optimization이 불필요한 이유:
   - LaBo의 대상: ImageNet (1000 클래스, 수천 개 후보 컨셉)
