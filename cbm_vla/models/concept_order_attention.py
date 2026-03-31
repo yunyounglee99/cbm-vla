@@ -257,6 +257,8 @@ if __name__ == "__main__":
     gt_order = torch.arange(n_concepts).unsqueeze(0).expand(batch_size, -1).float()
     loss = compute_order_loss(result["order_scores"], gt_order)
     print(f"\nOrder loss: {loss.item():.4f}")
+
+    module.eval()
     
     # Verify causal mask: concept 0 should have same embedding regardless of later concepts
     with torch.no_grad():
