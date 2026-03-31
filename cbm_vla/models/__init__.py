@@ -11,9 +11,18 @@ Modules:
     ConceptOrderAttention:   Causal self-attention for order learning (Phase 3)
     CompletionDetector:      Rule-based or MLP completion detection
     CBMVLA:                  Main model integrating all modules
+
+Loss Functions:
+    compute_encoder_alignment_loss:     Phase 1 InfoNCE alignment (cbm_encoder.py)
+    compute_scoring_loss:               Phase 2 combined scoring (concept_scoring.py)
+    compute_contrastive_embedding_loss: Phase 3 contrastive embedding (concept_cross_attention.py)
+    compute_order_loss:                 Phase 3 order learning (concept_order_attention.py)
 """
 
-from .cbm_encoder import CBMEncoder
+from .cbm_encoder import (
+    CBMEncoder,
+    compute_encoder_alignment_loss,
+)
 from .concept_scoring import (
     ConceptScoringModule,
     compute_scoring_loss,
@@ -21,7 +30,10 @@ from .concept_scoring import (
     compute_activation_bce_loss,
     compute_sparsity_loss,
 )
-from .concept_cross_attention import ConceptCrossAttention
+from .concept_cross_attention import (
+    ConceptCrossAttention,
+    compute_contrastive_embedding_loss,
+)
 from .concept_order_attention import (
     ConceptOrderAttention,
     compute_order_loss,

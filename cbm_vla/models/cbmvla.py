@@ -32,12 +32,18 @@ from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass
 
 # CBM-VLA 모듈
-from .cbm_encoder import CBMEncoder
+from .cbm_encoder import (
+    CBMEncoder,
+    compute_encoder_alignment_loss,
+)
 from .concept_scoring import (
     ConceptScoringModule,
     compute_scoring_loss,
 )
-from .concept_cross_attention import ConceptCrossAttention
+from .concept_cross_attention import (
+    ConceptCrossAttention,
+    compute_contrastive_embedding_loss,
+)
 from .concept_order_attention import (
     ConceptOrderAttention,
     compute_order_loss,
@@ -84,6 +90,10 @@ class CBMVLAConfig:
     # === Training ===
     dropout: float = 0.1
     
+    # === Loss weights (Phase 1) ===
+    alignment_temperature: float = 0.07   # InfoNCE temperature
+    alignment_pooling: str = "mean"       # "mean" or "cls"
+    
     # === Loss weights (Phase 2) ===
     lambda_similarity: float = 0.3
     lambda_activation_bce: float = 1.0
@@ -92,6 +102,7 @@ class CBMVLAConfig:
     # === Loss weights (Phase 3) ===
     lambda_order: float = 0.1
     lambda_contrastive: float = 0.05
+    contrastive_temperature: float = 0.1  # Contrastive embedding loss temperature
 
 
 class CBMVLA(nn.Module):
@@ -303,6 +314,59 @@ class CBMVLA(nn.Module):
     # Phase-specific forward methods
     # ================================================================
     
+    def forward_phase1(
+        self,
+        siglip_features: torch.Tensor,
+        target_text_embeddings: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Phase 1 Forward: CBM Encoder 학습
+        
+        나머지 모두 freeze. CBM Encoder만 학습합니다.
+        SigLIP feature에 MLP residual을 추가한 결과가
+        image description text embedding과 정렬되도록 학습합니다.
+        
+        학습 원리:
+            CBM Encoder는 H_output = H_siglip + scale * MLP(H_siglip)을 계산합니다.
+            InfoNCE contrastive loss를 통해, enhanced features의 mean pooling이
+            해당 이미지의 scene description text embedding과 가까워지도록,
+            다른 이미지의 text embedding과는 멀어지도록 학습합니다.
+        
+        Args:
+            siglip_features: [batch, num_tokens, siglip_hidden_dim]
+                SigLIP vision encoder의 출력 (freeze된 상태, detach 불필요)
+                예: [B, 128, 768] (2 cameras × 64 tokens)
+            target_text_embeddings: [batch, siglip_hidden_dim]
+                SigLIP text encoder로 인코딩한 image description embedding.
+                Data collection Phase에서 생성된 scene description
+                (예: "a red cup on a wooden table with a robotic arm nearby")을
+                SigLIP text encoder에 통과시킨 결과.
+                
+        Returns:
+            dict with:
+                "loss": scalar — InfoNCE alignment loss
+                "info": dict — logging metrics (v2t_acc, t2v_acc, pos_similarity 등)
+                "enhanced_features": [batch, num_tokens, siglip_hidden_dim]
+                    CBM Encoder 출력 (backbone 입력으로 사용 가능)
+        """
+        # 1. CBM Encoder: H_output = H_siglip + scale * MLP(H_siglip)
+        enhanced_features = self.cbm_encoder(siglip_features)
+        # [B, num_tokens, siglip_hidden_dim]
+        
+        # 2. Alignment loss (InfoNCE contrastive)
+        loss, loss_info = compute_encoder_alignment_loss(
+            enhanced_features=enhanced_features,
+            target_text_embeddings=target_text_embeddings,
+            temperature=self.config.alignment_temperature,
+            pooling=self.config.alignment_pooling,
+        )
+        
+        return {
+            "loss": loss,
+            "info": loss_info,
+            "enhanced_features": enhanced_features,
+        }
+    
     def forward_phase2(
         self,
         backbone_output: torch.Tensor,
@@ -361,57 +425,50 @@ class CBMVLA(nn.Module):
         Scoring module은 freeze. 선택된 concept에 대해:
         1. Cross-attention으로 embedding 추출
         2. Causal self-attention으로 순서 학습
-        3. Action expert로 action 생성 (flow matching loss)
+        3. Action expert에서 flow matching loss 계산
+        4. Contrastive embedding loss로 concept 의미 보존
         
-        Gradient는 action expert → order_attn → cross_attn → backbone LoRA로 흐름.
-        Scoring module에는 gradient가 흐르지 않음 (top-n selection이 gradient 끊음).
+        Loss 구성:
+            L_phase3 = L_flow_matching 
+                     + λ_order * L_order 
+                     + λ_contrastive * L_contrastive_embedding
         
         Args:
             backbone_output: [batch, num_tokens, vlm_hidden_dim]
             vlm_features: [batch, num_tokens, expert_hidden_dim]
-                Feature projector를 거친 backbone output
             gt_actions: [batch, chunk_size, action_dim]
-            gt_concept_ids: [batch, n_active] — 활성 concept의 pool index
-            gt_concept_order: [batch, n_active] — ground truth 실행 순서 (0,1,2,...)
+            gt_concept_ids: [batch, top_n] — GT로 선택해야 하는 concept indices
+            gt_concept_order: [batch, top_n] — GT concept 실행 순서
             attention_mask: [batch, num_tokens]
             
         Returns:
-            dict with losses and intermediate outputs
+            dict with loss, info, embeddings, indices
         """
         batch_size = backbone_output.shape[0]
         device = backbone_output.device
         
         # ================================================================
-        # 1. Concept Scoring (frozen, no gradient)
+        # 1. Concept Scoring → top-n selection (frozen, no gradient)
         # ================================================================
         with torch.no_grad():
             scoring_result = self.concept_scoring(
                 backbone_output, return_matrix=True
             )
+            selected_indices, selected_scores = self.concept_scoring.select_top_n(
+                scoring_result["concept_scores"], n=self.config.top_n_concepts
+            )
         
-        # Use scoring module's actual predictions (not GT) for robustness
-        # → Phase 3에서 scoring 오류가 포함된 상태로 학습
-        # → action expert가 scoring 오류에 robust해지는 효과
-        selected_indices, selected_scores = self.concept_scoring.select_top_n(
-            scoring_result["concept_scores"],
-            n=self.config.top_n_concepts,
-        )
-        # selected_indices: [batch, n]
-        
+        # ================================================================
+        # 2. Gather selected concept text embeddings
+        # ================================================================
         n_selected = selected_indices.shape[1]
-        
-        # ================================================================
-        # 2. Get concept text embeddings for selected concepts
-        # ================================================================
-        # concept_text_embeddings: [num_concepts, concept_text_dim]
-        # selected_indices: [batch, n] → gather text embeddings
-        expanded_indices = selected_indices.unsqueeze(-1).expand(
+        expanded = selected_indices.unsqueeze(-1).expand(
             -1, -1, self.config.concept_text_dim
         )
-        # [batch, n, concept_text_dim]
         selected_text_embs = self.concept_text_embeddings.unsqueeze(0).expand(
             batch_size, -1, -1
-        ).gather(1, expanded_indices)
+        ).gather(1, expanded)
+        # [batch, n_selected, concept_text_dim]
         
         # ================================================================
         # 3. Cross-Attention: backbone → concept embeddings
@@ -419,7 +476,9 @@ class CBMVLA(nn.Module):
         # Score matrix에서 선택된 concept의 token-level score를 bias로 활용
         score_matrix = scoring_result["score_matrix"]  # [B, T, C]
         # selected concepts의 score만 추출: [B, T, C] → [B, n, T]
-        score_indices = selected_indices.unsqueeze(1).expand(-1, score_matrix.shape[1], -1)
+        score_indices = selected_indices.unsqueeze(1).expand(
+            -1, score_matrix.shape[1], -1
+        )
         selected_token_scores = score_matrix.gather(2, score_indices)  # [B, T, n]
         concept_score_bias = selected_token_scores.transpose(1, 2)     # [B, n, T]
         
@@ -487,10 +546,29 @@ class CBMVLA(nn.Module):
         # Order loss
         order_loss = compute_order_loss(order_scores, gt_concept_order[:, :n_selected])
         
+        # Contrastive embedding loss (Phase 3 신규)
+        # Cross-attention 출력이 concept text의 의미를 보존하도록 정렬
+        # contrastive_proj: concept_text_dim(768) → concept_embed_dim(128)
+        concept_text_projected = self.concept_cross_attn.contrastive_proj(
+            selected_text_embs
+        )
+        # [B, n_selected, concept_embed_dim]
+        
+        contrastive_loss, contrastive_info = compute_contrastive_embedding_loss(
+            concept_embeddings=concept_embeddings,
+            concept_text_projected=concept_text_projected.detach(),
+            # detach 이유: text projection과 concept embedding 양쪽 모두
+            # 학습하면 trivial solution으로 collapse 가능.
+            # text projection은 고정된 anchor로 사용하고,
+            # concept embedding만 이 anchor 방향으로 정렬되도록 학습.
+            temperature=self.config.contrastive_temperature,
+        )
+        
         # Total loss
         total_loss = (
             flow_loss
             + self.config.lambda_order * order_loss
+            + self.config.lambda_contrastive * contrastive_loss
         )
         
         # ================================================================
@@ -498,8 +576,10 @@ class CBMVLA(nn.Module):
         # ================================================================
         info = {
             **flow_info,
+            **contrastive_info,
             "loss_flow": flow_loss.item(),
             "loss_order": order_loss.item(),
+            "loss_contrastive": contrastive_loss.item(),
             "loss_total": total_loss.item(),
             "n_selected_concepts": n_selected,
         }
@@ -639,28 +719,33 @@ class CBMVLA(nn.Module):
         """
         Phase 3: CrossAttn + OrderAttn + ActionExpert + concept_to_expert_proj 학습
         Scoring module freeze. Backbone LoRA는 별도로 설정 필요.
+        
+        Note: concept_cross_attn.contrastive_proj는 Phase 3에서 학습됩니다.
+              contrastive_embedding_loss에서 concept_text_projected는 detach()되므로
+              contrastive_proj의 gradient는 contrastive loss에서 직접 흐르지 않고,
+              cross-attention forward pass를 통해 간접적으로만 학습됩니다.
+              → contrastive_proj는 frozen으로 두어도 됩니다 (아래 설정에서 unfreeze하지만,
+                실질적으로 gradient가 흐르려면 forward에서 사용되어야 합니다).
         """
         self._freeze_all()
         
-        # Trainable modules in Phase 3
-        trainable_modules = [
-            self.concept_cross_attn,
-            self.concept_order_attn,
-            self.concept_to_expert_proj,
-            self.action_expert,
-        ]
-        if self.feature_projector is not None:
-            trainable_modules.append(self.feature_projector)
-        if self.state_projector is not None:
-            trainable_modules.append(self.state_projector)
-        if isinstance(self.completion_detector, nn.Module):
-            trainable_modules.append(self.completion_detector)
+        # Cross-attention (contrastive_proj 포함)
+        for p in self.concept_cross_attn.parameters():
+            p.requires_grad = True
         
-        for module in trainable_modules:
-            for p in module.parameters():
+        # Order attention
+        for p in self.concept_order_attn.parameters():
+            p.requires_grad = True
+        
+        # Concept-to-expert projection
+        for p in self.concept_to_expert_proj.parameters():
+            p.requires_grad = True
+        
+        # Action expert
+        if self.action_expert is not None:
+            for p in self.action_expert.parameters():
                 p.requires_grad = True
         
-        # Backbone LoRA는 train/finetuning.py에서 별도 설정
         self._print_trainable_status("Phase 3")
     
     def _freeze_all(self):
@@ -668,63 +753,24 @@ class CBMVLA(nn.Module):
         for p in self.parameters():
             p.requires_grad = False
     
-    def _print_trainable_status(self, phase: str):
-        """Print trainable parameter summary"""
-        total = sum(p.numel() for p in self.parameters())
+    def _print_trainable_status(self, phase_name: str):
+        """Print trainable/frozen parameter counts"""
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"\n[{phase}] Trainable: {trainable:,} / {total:,} "
-              f"({100*trainable/max(total,1):.2f}%)")
-    
-    def get_num_cbm_params(self) -> int:
-        """CBM 모듈만의 parameter 수"""
-        cbm_modules = [
-            self.cbm_encoder,
-            self.concept_scoring,
-            self.concept_cross_attn,
-            self.concept_order_attn,
-            self.concept_to_expert_proj,
-        ]
-        if isinstance(self.completion_detector, nn.Module):
-            cbm_modules.append(self.completion_detector)
-        
-        return sum(
-            sum(p.numel() for p in m.parameters())
-            for m in cbm_modules
-        )
+        total = sum(p.numel() for p in self.parameters())
+        frozen = total - trainable
+        print(f"\n[{phase_name}] Trainable: {trainable:,} | "
+              f"Frozen: {frozen:,} | Total: {total:,}")
 
 
 if __name__ == "__main__":
     print("Testing CBMVLA...")
     
-    config = CBMVLAConfig(
-        vlm_hidden_dim=960,
-        expert_hidden_dim=720,
-        num_concepts=50,
-        concept_embed_dim=128,
-        top_n_concepts=6,
-    )
-    
-    model = CBMVLA(config)
-    print(f"\nTotal CBM params: {model.get_num_cbm_params():,}")
-    
-    # Simulate Phase 2
-    print("\n=== Phase 2 Test ===")
-    model.configure_phase2()
-    
-    backbone = torch.randn(2, 139, 960)
-    ref_scores = torch.randn(2, 50)
-    gt_active = torch.zeros(2, 50)
-    gt_active[:, :5] = 1.0
-    
-    result = model.forward_phase2(backbone, ref_scores, gt_active)
-    print(f"Phase 2 loss: {result['loss'].item():.4f}")
-    result["loss"].backward()
-    
-    # Simulate Phase 3 (without actual SmolVLA backbone)
-    print("\n=== Phase 3 Test (mock) ===")
-    
-    # Create mock action expert
     from smolvla.smolvla.action_expert import FlowMatchingActionExpert
+    
+    config = CBMVLAConfig()
+    model = CBMVLA(config)
+    
+    # Mock action expert (normally loaded from SmolVLA)
     model.action_expert = FlowMatchingActionExpert(
         vlm_hidden_dim=720,  # expert_hidden_dim (already projected)
         action_dim=7,
@@ -733,6 +779,42 @@ if __name__ == "__main__":
         hidden_dim_ratio=1.0,  # Already at expert dim
     )
     
+    # Test Phase 1
+    print("\n=== Phase 1 Test ===")
+    model.configure_phase1()
+    
+    siglip_feat = torch.randn(4, 128, 768)
+    text_emb = torch.randn(4, 768)
+    
+    result1 = model.forward_phase1(
+        siglip_features=siglip_feat,
+        target_text_embeddings=text_emb,
+    )
+    print(f"Phase 1 loss: {result1['loss'].item():.4f}")
+    print(f"Enhanced features shape: {result1['enhanced_features'].shape}")
+    for k, v in result1["info"].items():
+        print(f"  {k}: {v:.4f}")
+    
+    # Test Phase 2
+    print("\n=== Phase 2 Test ===")
+    model.configure_phase2()
+    
+    backbone = torch.randn(2, 139, 960)
+    ref_scores = torch.randn(2, 50)
+    gt_active = torch.zeros(2, 50)
+    gt_active[:, :5] = 1.0
+    
+    result2 = model.forward_phase2(
+        backbone_output=backbone,
+        reference_scores=ref_scores,
+        gt_active_concepts=gt_active,
+    )
+    print(f"Phase 2 loss: {result2['loss'].item():.4f}")
+    for k, v in result2["info"].items():
+        print(f"  {k}: {v:.4f}")
+    
+    # Test Phase 3
+    print("\n=== Phase 3 Test ===")
     model.configure_phase3()
     
     # Set concept text embeddings
@@ -766,6 +848,6 @@ if __name__ == "__main__":
     print(f"Concept tasks: {len(inf_result['concept_tasks'])}")
     for task in inf_result["concept_tasks"][:3]:
         print(f"  Task {task['task_id']}: pool_id={task['concept_pool_id']}, "
-              f"order={task['order_score']:.3f}, activation={task['activation_score']:.3f}")
+            f"order={task['order_score']:.3f}, activation={task['activation_score']:.3f}")
     
     print("\n✓ CBMVLA test completed!")

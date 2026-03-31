@@ -19,7 +19,7 @@ Design Decisions:
     - Scoring module이 freeze된 Phase 3에서 backbone LoRA와 함께 학습
     - Score matrix를 attention bias로 활용 가능 (concept-guided attention)
 
-Params: ~2.7M (Q_proj + K_proj + V_proj + Out_proj + aggregation)
+Params: ~2.7M (Q_proj + K_proj + V_proj + Out_proj + aggregation + contrastive_proj)
 """
 
 import torch
@@ -95,6 +95,11 @@ class ConceptCrossAttention(nn.Module):
                 nn.GELU(),
             )
         
+        # Contrastive projection: concept_text_dim → concept_embed_dim
+        # Phase 3 contrastive embedding loss에서 차원 정렬에 사용
+        # concept_text_dim(768)과 concept_embed_dim(128)의 차원 불일치를 해소
+        self.contrastive_proj = nn.Linear(concept_text_dim, concept_embed_dim)
+        
         # Layer normalization
         self.q_norm = nn.LayerNorm(self.attn_dim)
         self.out_norm = nn.LayerNorm(concept_embed_dim)
@@ -111,6 +116,10 @@ class ConceptCrossAttention(nn.Module):
                 nn.init.zeros_(module.bias)
         if self.num_sub_queries > 1:
             nn.init.xavier_uniform_(self.sub_query_proj.weight, gain=0.5)
+        # Contrastive projection 초기화
+        nn.init.xavier_uniform_(self.contrastive_proj.weight)
+        if self.contrastive_proj.bias is not None:
+            nn.init.zeros_(self.contrastive_proj.bias)
     
     def forward(
         self,
@@ -245,6 +254,99 @@ class ConceptCrossAttention(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
 
+# ================================================================
+# Phase 3 Loss Function
+# ================================================================
+
+def compute_contrastive_embedding_loss(
+    concept_embeddings: torch.Tensor,
+    concept_text_projected: torch.Tensor,
+    temperature: float = 0.1,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """
+    Phase 3 Contrastive Embedding Loss (InfoNCE)
+    
+    Cross-attention 출력 concept embedding과 projected concept text embedding 사이의
+    의미적 정렬을 InfoNCE contrastive loss로 유지합니다.
+    
+    왜 이 loss가 필요한가:
+        Phase 3에서 flow matching loss만으로 학습하면, cross-attention 출력이
+        action 생성에 유리한 방향으로만 변형되어 concept의 원래 의미를 잃을 수 있습니다.
+        (예: "grasp" concept embedding이 "lift"와 구분 불가능해지는 collapse)
+        
+        이 loss가 anchor 역할을 하여:
+        - 같은 concept의 embedding은 원래 text embedding과 가깝게 유지
+        - 다른 concept의 embedding은 서로 멀게 유지
+        → concept embedding의 discriminability 보존
+    
+    Batch 내 모든 concept을 flatten하여 contrastive pairs 구성:
+    예: batch=4, n_selected=6 → 24개 concept, 24×24 similarity matrix
+    
+    Args:
+        concept_embeddings: [batch, n_selected, concept_embed_dim]
+            Cross-attention 출력. backbone에서 추출된 concept 표현.
+        concept_text_projected: [batch, n_selected, concept_embed_dim]
+            Concept text embedding을 contrastive_proj로 projection한 결과.
+            (ConceptCrossAttention.contrastive_proj 사용)
+            주의: 이 텐서는 detach()되어 전달되어야 합니다.
+            양쪽 모두 학습하면 trivial solution으로 collapse 가능.
+        temperature: Contrastive loss temperature
+            
+    Returns:
+        loss: scalar — InfoNCE contrastive loss
+        info: dict with individual metrics for logging
+    """
+    batch_size, n_selected, embed_dim = concept_embeddings.shape
+    
+    # ================================================================
+    # 1. Flatten: [B, n, D] → [B*n, D]
+    # ================================================================
+    ce_flat = concept_embeddings.reshape(-1, embed_dim)      # [B*n, D]
+    ct_flat = concept_text_projected.reshape(-1, embed_dim)  # [B*n, D]
+    total_concepts = ce_flat.shape[0]  # B * n
+    
+    # ================================================================
+    # 2. L2 normalize for cosine similarity
+    # ================================================================
+    ce_norm = F.normalize(ce_flat, p=2, dim=-1)  # [B*n, D]
+    ct_norm = F.normalize(ct_flat, p=2, dim=-1)  # [B*n, D]
+    
+    # ================================================================
+    # 3. Similarity matrix: [B*n, B*n]
+    # ================================================================
+    sim_matrix = torch.matmul(ce_norm, ct_norm.t()) / temperature
+    # sim[i, j] = cos_sim(concept_embedding_i, concept_text_j) / τ
+    
+    # ================================================================
+    # 4. Symmetric InfoNCE loss
+    # ================================================================
+    labels = torch.arange(total_concepts, device=sim_matrix.device)
+    
+    # Embedding → Text direction
+    loss_e2t = F.cross_entropy(sim_matrix, labels)
+    # Text → Embedding direction
+    loss_t2e = F.cross_entropy(sim_matrix.t(), labels)
+    # Average
+    loss = (loss_e2t + loss_t2e) / 2.0
+    
+    # ================================================================
+    # 5. Info dict for logging
+    # ================================================================
+    with torch.no_grad():
+        e2t_acc = (sim_matrix.argmax(dim=1) == labels).float().mean().item()
+        t2e_acc = (sim_matrix.t().argmax(dim=1) == labels).float().mean().item()
+        pos_sim = (ce_norm * ct_norm).sum(dim=-1).mean().item()
+    
+    info = {
+        "loss_contrastive_embedding": loss.item(),
+        "contrastive_e2t_acc": e2t_acc,
+        "contrastive_t2e_acc": t2e_acc,
+        "contrastive_pos_similarity": pos_sim,
+    }
+    
+    return loss, info
+
+
 if __name__ == "__main__":
     print("Testing ConceptCrossAttention...")
     
@@ -282,10 +384,24 @@ if __name__ == "__main__":
     attn_sum = result["attention_weights"].sum(dim=-1)
     print(f"Attention weight sum (should ≈ 1.0): {attn_sum[0].tolist()}")
     
+    # Test contrastive embedding loss
+    print("\nTesting compute_contrastive_embedding_loss...")
+    concept_text_proj = module.contrastive_proj(concept_text)
+    # [B, n_selected, concept_embed_dim]
+    
+    loss, info = compute_contrastive_embedding_loss(
+        concept_embeddings=result["concept_embeddings"],
+        concept_text_projected=concept_text_proj.detach(),
+    )
+    print(f"Contrastive loss: {loss.item():.4f}")
+    for k_name, v in info.items():
+        print(f"  {k_name}: {v:.4f}")
+    
     # Gradient check
-    loss = result["concept_embeddings"].sum()
     loss.backward()
     print(f"Gradient flows to q_proj: {module.q_proj.weight.grad is not None}")
     print(f"Gradient flows to k_proj: {module.k_proj.weight.grad is not None}")
+    print(f"contrastive_proj grad (should be None — detached): "
+        f"{module.contrastive_proj.weight.grad is not None}")
     
-    print("\n✓ ConceptCrossAttention test completed!")
+    print("\n✓ ConceptCrossAttention + contrastive loss test completed!")
