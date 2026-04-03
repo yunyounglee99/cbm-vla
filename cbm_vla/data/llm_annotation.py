@@ -116,9 +116,12 @@ def build_user_prompt(segment: dict, episode_info: dict) -> str:
     
     total_segs = len(episode_info.get("segments", []))
     
+    robot_type = episode_info.get("robot_type", "unknown_robot")
+    embodiment_task = f"[Robot: {robot_type}] {episode_info.get('task_description', 'Unknown task')}"
+
     prompt = f"""Analyze this robotic manipulation frame and generate an action concept.
 
-TASK: {episode_info.get('task_description', 'Unknown task')}
+TASK: {embodiment_task}
 
 SEGMENT CONTEXT:
 - Position in episode: segment {segment['segment_id']} of {total_segs} (frame {segment['start_frame']}-{segment['end_frame']} of {episode_info.get('total_frames', 0)})

@@ -96,6 +96,12 @@ SO101_JOINT_NAMES = [
 SO101_ACTION_DIM = 6   # 5 arm joints + 1 gripper
 SO101_STATE_DIM = 6    # 동일
 
+# ================================================================
+# Multi-Embodiment 설정
+# ================================================================
+MAX_ACTION_DIM = 14  # ALOHA(14-DoF) 등 가장 큰 로봇 기준
+MAX_STATE_DIM = 14   # 상태 차원도 동일하게 맞춤
+
 
 @dataclass
 class DatasetInfo:
@@ -374,8 +380,32 @@ def load_episodes_from_repo(
                 if not actions:
                     continue
                 
-                actions_array = np.stack(actions)
-                states_array = np.stack(states) if states else np.zeros_like(actions_array)
+                raw_actions_array = np.stack(actions)
+                raw_states_array = np.stack(states) if states else np.zeros_like(raw_actions_array)
+                
+                # --- [핵심] Multi-Embodiment Zero-Padding ---
+                actual_action_dim = raw_actions_array.shape[-1]
+                actual_state_dim = raw_states_array.shape[-1]
+                
+                # Action 패딩
+                action_pad_size = MAX_ACTION_DIM - actual_action_dim
+                if action_pad_size > 0:
+                    # (0,0): 프레임 축은 그대로 유지, (0, action_pad_size): 차원 축 뒤쪽에 0 추가
+                    actions_array = np.pad(raw_actions_array, ((0, 0), (0, action_pad_size)), mode='constant', constant_values=0.0)
+                else:
+                    actions_array = raw_actions_array
+                
+                # State 패딩 (상태 차원도 맞춰주어야 모델에러가 안 남)
+                state_pad_size = MAX_STATE_DIM - actual_state_dim
+                if state_pad_size > 0:
+                    states_array = np.pad(raw_states_array, ((0, 0), (0, state_pad_size)), mode='constant', constant_values=0.0)
+                else:
+                    states_array = raw_states_array
+                    
+                # --- [핵심] Action Mask 생성 ---
+                # 실제 로봇의 관절이 있는 곳은 1.0, 패딩으로 채운 가짜 관절은 0.0
+                action_mask = np.zeros(MAX_ACTION_DIM, dtype=np.float32)
+                action_mask[:actual_action_dim] = 1.0
                 
                 # 데이터셋 로컬 경로 (이미지 접근용)
                 dataset_root = None
@@ -386,8 +416,11 @@ def load_episodes_from_repo(
                 
                 episodes.append({
                     "episode_id": ep_idx,
-                    "actions": actions_array,
-                    "states": states_array,
+                    "actions": actions_array,       # 패딩된 [T, 14] 텐서
+                    "states": states_array,         # 패딩된 [T, 14] 텐서
+                    "action_mask": action_mask,     # [14] 마스크 (예: [1,1,1,1,1,1,0,0,0,0,0,0,0,0])
+                    "actual_action_dim": actual_action_dim, # 원래 차원 (예: 6)
+                    "robot_type": dataset_info.robot_type,  # 로봇 종류 (예: "so101")
                     "task_description": task_desc,
                     "num_frames": len(actions),
                     "fps": dataset_info.fps,

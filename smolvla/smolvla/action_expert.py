@@ -565,23 +565,12 @@ def compute_flow_matching_loss(
     actions_gt: torch.Tensor,
     vlm_features: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
+    action_mask: Optional[torch.Tensor] = None,  # [추가됨] 로봇별 유효 관절 마스크 [B, action_dim]
     alpha: float = 0.5,
     beta: float = 0.5,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """
     Compute Flow Matching Loss (Equation 1)
-    
-    Args:
-        action_expert: FlowMatchingActionExpert model
-        actions_gt: [batch_size, chunk_size, action_dim] - ground truth actions
-        vlm_features: [batch_size, seq_len, vlm_hidden_dim]
-        attention_mask: [batch_size, seq_len]
-        alpha: Beta distribution parameter
-        beta: Beta distribution parameter
-        
-    Returns:
-        loss: Scalar loss
-        info: Dictionary with additional information
     """
     batch_size = actions_gt.shape[0]
     device = actions_gt.device
@@ -610,8 +599,33 @@ def compute_flow_matching_loss(
     )
     # [batch_size, chunk_size, action_dim]
     
-    # Compute MSE loss
-    loss = F.mse_loss(predicted_vector_field, target_vector_field)
+    # =====================================================================
+    # [수정됨] Action Masking이 적용된 MSE Loss 계산
+    # =====================================================================
+    if action_mask is not None:
+        # 1. 차원별 오차를 쪼개서 유지 (reduction='none')
+        raw_loss = F.mse_loss(predicted_vector_field, target_vector_field, reduction='none')
+        # raw_loss: [B, chunk_size, action_dim]
+        
+        # 2. 마스크 차원 확장 (시간축 chunk_size에 대해 Broadcasting)
+        # [B, action_dim] -> [B, 1, action_dim]
+        mask_expanded = action_mask.unsqueeze(1)
+        
+        # 3. 마스크 곱하기 (0으로 패딩된 차원의 오차는 완전히 소거됨)
+        masked_loss = raw_loss * mask_expanded
+        
+        # 4. 유효한(1.0) 데이터 개수만 카운트 (batch 안의 모든 유효 관절 수 * chunk_size)
+        valid_elements = mask_expanded.sum() * actions_gt.size(1) 
+        
+        # 5. 최종 평균 오차 계산 (0 나누기 에러 방지)
+        if valid_elements > 0:
+            loss = masked_loss.sum() / valid_elements
+        else:
+            loss = masked_loss.sum() * 0.0
+    else:
+        # 마스크가 입력되지 않았을 때의 기본 동작 (기존과 동일)
+        loss = F.mse_loss(predicted_vector_field, target_vector_field)
+    # =====================================================================
     
     # Additional info for logging
     info = {
@@ -650,6 +664,11 @@ if __name__ == "__main__":
     actions_gt = torch.randn(batch_size, chunk_size, action_dim)
     attention_mask = torch.ones(batch_size, seq_len)
     
+    # [추가됨] 테스트용 더미 action_mask (예: 절반은 실제 관절, 절반은 패딩이라 가정)
+    # batch=4, action_dim=7 이라고 할 때, 앞의 4개 차원만 1.0이고 뒤의 3개 차원은 0.0으로 패딩되었다고 가정
+    dummy_action_mask = torch.zeros(batch_size, action_dim)
+    dummy_action_mask[:, :4] = 1.0  
+    
     # Test training loss
     print("\nTesting training loss...")
     loss, info = compute_flow_matching_loss(
@@ -657,6 +676,7 @@ if __name__ == "__main__":
         actions_gt=actions_gt,
         vlm_features=vlm_features,
         attention_mask=attention_mask,
+        action_mask=dummy_action_mask,  # [추가됨]
     )
     
     print(f"Loss: {loss.item():.4f}")
