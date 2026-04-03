@@ -314,26 +314,30 @@ def load_episodes_from_repo(
                 print(f"    Episode {ep_idx}/{num_episodes}...")
             
             try:
-                # v2: meta.episodes에서 인덱스 범위 가져오기
+                # LeRobot 최신 버전(0.5.0+) 및 다양한 포맷 호환 인덱스 추출 로직
                 if hasattr(dataset, 'meta') and hasattr(dataset.meta, 'episodes'):
                     episodes_meta = dataset.meta.episodes
-                    if hasattr(episodes_meta, 'dataset_from_index'):
-                        # v2 format
+                    
+                    # 'hasattr' 대신 딕셔너리/데이터셋 Key 존재 여부('in')로 확인합니다.
+                    if "dataset_from_index" in episodes_meta:
                         from_idx = episodes_meta["dataset_from_index"][ep_idx]
                         to_idx = episodes_meta["dataset_to_index"][ep_idx]
-                    elif isinstance(episodes_meta, dict) and "from" in episodes_meta:
+                    elif "from_index" in episodes_meta:
+                        from_idx = episodes_meta["from_index"][ep_idx]
+                        to_idx = episodes_meta["to_index"][ep_idx]
+                    elif "from" in episodes_meta:
                         from_idx = episodes_meta["from"][ep_idx]
                         to_idx = episodes_meta["to"][ep_idx]
                     else:
-                        # v3 또는 다른 포맷 — episode_index 기반
-                        from_idx = dataset.episode_data_index["from"][ep_idx].item()
-                        to_idx = dataset.episode_data_index["to"][ep_idx].item()
-                elif hasattr(dataset, 'episode_data_index'):
-                    from_idx = dataset.episode_data_index["from"][ep_idx].item()
-                    to_idx = dataset.episode_data_index["to"][ep_idx].item()
+                        print(f"    [WARNING] Cannot find index keys in meta.episodes, skipping ep {ep_idx}")
+                        continue
                 else:
                     print(f"    [WARNING] Cannot find episode boundaries, skipping ep {ep_idx}")
                     continue
+                
+                # 안전장치: Tensor나 Numpy 형식일 경우 순수 정수(int)로 변환
+                if hasattr(from_idx, 'item'): from_idx = from_idx.item()
+                if hasattr(to_idx, 'item'): to_idx = to_idx.item()
                 
                 # 프레임별 데이터 수집
                 actions = []

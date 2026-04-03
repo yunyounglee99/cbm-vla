@@ -1,0 +1,20 @@
+{
+  "source_repos": [],
+  "total_episodes": 0,
+  "total_frames": 0,
+  "total_training_entries": 0,
+  "robot_type": "so101",
+  "action_dim": 6,
+  "state_dim": 6,
+  "num_concepts": 0,
+  "joint_names": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper"
+  ],
+  "pipeline_version": "1.0",
+  "created_at": "2026-04-03 16:14:17"
+}
