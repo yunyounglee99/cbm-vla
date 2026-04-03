@@ -1,6 +1,3 @@
-# export OPENROUTER_API_KEY="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"
-OPENROUTER_API_KEY = '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'
-
 """
 Stage 2: Gemini API Concept Annotation
 ========================================
@@ -525,7 +522,7 @@ class GeminiConceptAnnotator:
 if __name__ == "__main__":
     print("Testing GeminiConceptAnnotator...")
     
-    annotator = GeminiConceptAnnotator(api_key=OPENROUTER_API_KEY)
+    annotator = GeminiConceptAnnotator()
     
     # 비용 예상 테스트
     print("\n=== Cost Estimation ===")
