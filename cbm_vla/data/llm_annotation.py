@@ -1,3 +1,6 @@
+# export OPENROUTER_API_KEY="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"
+OPENROUTER_API_KEY = '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'
+
 """
 Stage 2: Gemini API Concept Annotation
 ========================================
@@ -153,40 +156,33 @@ class GeminiConceptAnnotator:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-2.0-flash",
+        model_name: str = "google/gemini-2.5-flash", # OpenRouter 모델명으로 변경
         max_rpm: int = 60,
     ):
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        # OpenRouter API 키를 환경변수에서 가져오도록 수정
+        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY") 
         self.model_name = model_name
         self.max_rpm = max_rpm
-        self._request_interval = 60.0 / max_rpm  # 요청 간 최소 대기시간
+        self._request_interval = 60.0 / max_rpm
         self._last_request_time = 0
         
-        # Google Generative AI SDK 사용
         self._client = None
     
     def _init_client(self):
-        """Gemini 클라이언트 초기화"""
+        """OpenRouter 호환 OpenAI 클라이언트 초기화"""
         if self._client is not None:
             return
         
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=self.api_key)
-            self._client = genai.GenerativeModel(
-                model_name=self.model_name,
-                system_instruction=SYSTEM_PROMPT,
-                generation_config={
-                    "temperature": 0.2,       # 일관성 높게
-                    "top_p": 0.8,
-                    "max_output_tokens": 256,  # 짧은 JSON 출력
-                    "response_mime_type": "application/json",  # JSON 강제
-                },
+            from openai import OpenAI
+            self._client = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=self.api_key,
             )
-            print(f"  Gemini client initialized: {self.model_name}")
+            print(f"  OpenRouter client initialized: {self.model_name}")
         except ImportError:
-            print("  [WARNING] google-generativeai not installed.")
-            print("  Install: pip install google-generativeai")
+            print("  [WARNING] openai not installed.")
+            print("  Install: pip install openai")
             self._client = None
     
     def _rate_limit(self):
@@ -197,17 +193,99 @@ class GeminiConceptAnnotator:
             time.sleep(self._request_interval - elapsed)
         self._last_request_time = time.time()
     
-    def _load_image(self, image_path: str) -> Optional[dict]:
-        """이미지를 Gemini API 형식으로 로드"""
+    def _get_base64_image(self, image_path: str) -> Optional[str]:
+        """이미지를 OpenRouter용 Base64 문자열로 로드 및 변환"""
         try:
             import PIL.Image
             img = PIL.Image.open(image_path)
-            # LOW resolution으로 리사이즈 (토큰 절약: 640x480 → 320x240)
+            # LOW resolution으로 리사이즈 (토큰 절약: 320x240)
             img = img.resize((320, 240), PIL.Image.LANCZOS)
-            return img
+            
+            # 이미지를 메모리 버퍼에 JPEG로 저장 후 Base64 인코딩
+            buffered = io.BytesIO()
+            img.save(buffered, format="JPEG")
+            img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+            return img_str
         except Exception as e:
-            print(f"    [ERROR] Failed to load image {image_path}: {e}")
+            print(f"    [ERROR] Failed to load/encode image {image_path}: {e}")
             return None
+
+    def annotate_single(
+        self,
+        image_path: str,
+        segment: dict,
+        episode_info: dict,
+    ) -> Optional[dict]:
+        self._init_client()
+        
+        if self._client is None:
+            return self._fallback_annotation(segment, episode_info)
+        
+        # Base64 이미지 변환
+        base64_image = self._get_base64_image(image_path)
+        if base64_image is None:
+            return self._fallback_annotation(segment, episode_info)
+        
+        # 프롬프트 생성
+        prompt = build_user_prompt(segment, episode_info)
+        
+        # Rate limiting
+        self._rate_limit()
+        
+        # API 호출 (OpenRouter / OpenAI 구조)
+        try:
+            response = self._client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": SYSTEM_PROMPT
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                response_format={"type": "json_object"}, # JSON 강제 출력
+                temperature=0.2,
+                top_p=0.8,
+                max_tokens=256,
+            )
+            
+            # JSON 파싱
+            response_content = response.choices[0].message.content
+            result = json.loads(response_content)
+            
+            # 필드 검증 및 포맷팅 (기존 로직 유지)
+            required_fields = ["action_concept", "description", "image_description"]
+            for field in required_fields:
+                if field not in result:
+                    result[field] = "unknown"
+            
+            result["action_concept"] = (
+                result["action_concept"]
+                .lower()
+                .strip()
+                .replace(" ", "_")
+                .replace("-", "_")
+            )
+            
+            return result
+            
+        except Exception as e:
+            print(f"    [ERROR] OpenRouter API call failed: {e}")
+            return self._fallback_annotation(segment, episode_info)
     
     def _extract_frame_image(
         self,
@@ -261,74 +339,6 @@ class GeminiConceptAnnotator:
             pass
         
         return None
-    
-    def annotate_single(
-        self,
-        image_path: str,
-        segment: dict,
-        episode_info: dict,
-    ) -> Optional[dict]:
-        """
-        단일 세그먼트에 대한 컨셉 생성
-        
-        Args:
-            image_path: 대표 프레임 이미지 경로
-            segment: 세그먼트 메타데이터
-            episode_info: 에피소드 메타데이터
-            
-        Returns:
-            {
-                "action_concept": "approach_object",
-                "description": "Robot arm moves forward toward the red cube",
-                "image_description": "A robotic arm extends toward a red cube on a table"
-            }
-        """
-        self._init_client()
-        
-        if self._client is None:
-            # SDK 없을 때 fallback: 메타데이터 기반 규칙적 생성
-            return self._fallback_annotation(segment, episode_info)
-        
-        # 이미지 로드
-        image = self._load_image(image_path)
-        if image is None:
-            return self._fallback_annotation(segment, episode_info)
-        
-        # 프롬프트 생성
-        prompt = build_user_prompt(segment, episode_info)
-        
-        # Rate limiting
-        self._rate_limit()
-        
-        # API 호출
-        try:
-            response = self._client.generate_content(
-                [image, prompt],
-            )
-            
-            # JSON 파싱
-            result = json.loads(response.text)
-            
-            # 필드 검증
-            required_fields = ["action_concept", "description", "image_description"]
-            for field in required_fields:
-                if field not in result:
-                    result[field] = "unknown"
-            
-            # action_concept을 snake_case로 정규화
-            result["action_concept"] = (
-                result["action_concept"]
-                .lower()
-                .strip()
-                .replace(" ", "_")
-                .replace("-", "_")
-            )
-            
-            return result
-            
-        except Exception as e:
-            print(f"    [ERROR] Gemini API call failed: {e}")
-            return self._fallback_annotation(segment, episode_info)
     
     def _fallback_annotation(
         self,
@@ -514,7 +524,7 @@ class GeminiConceptAnnotator:
 if __name__ == "__main__":
     print("Testing GeminiConceptAnnotator...")
     
-    annotator = GeminiConceptAnnotator(api_key="test")
+    annotator = GeminiConceptAnnotator(api_key=OPENROUTER_API_KEY)
     
     # 비용 예상 테스트
     print("\n=== Cost Estimation ===")
