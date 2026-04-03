@@ -38,6 +38,7 @@ Stage 2: Gemini API Concept Annotation
 import base64
 import json
 import time
+import io
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
