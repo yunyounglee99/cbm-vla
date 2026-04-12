@@ -1,0 +1,23 @@
+{
+  "source_repos": [
+    "HuggingFaceVLA/community_dataset_v1",
+    "HuggingFaceVLA/community_dataset_v2"
+  ],
+  "total_sub_datasets": 20,
+  "total_episodes": 100,
+  "total_frames": 47722,
+  "total_training_entries": 100,
+  "total_segments": 1039,
+  "num_concepts": 8,
+  "max_action_dim": 15,
+  "max_state_dim": 14,
+  "robot_type_distribution": {
+    "so100": 100
+  },
+  "action_dim_distribution": {
+    "6": 100
+  },
+  "pipeline_version": "2.0",
+  "smolvla_compatible": true,
+  "created_at": "2026-04-12 19:41:35"
+}

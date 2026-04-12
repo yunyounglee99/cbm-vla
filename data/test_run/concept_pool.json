@@ -1,0 +1,96 @@
+[
+  {
+    "concept_id": 0,
+    "name": "move_right",
+    "description": "Robot moves arm right",
+    "frequency": 145,
+    "frequency_pct": 14.0,
+    "cluster_size": 9,
+    "variants": [
+      "move_down",
+      "move_up",
+      "move_wrist_up",
+      "move_backward",
+      "move_left"
+    ]
+  },
+  {
+    "concept_id": 1,
+    "name": "release_object",
+    "description": "Robot gripper opens to release the object",
+    "frequency": 695,
+    "frequency_pct": 66.9,
+    "cluster_size": 2,
+    "variants": [
+      "release_object",
+      "grasp_object"
+    ]
+  },
+  {
+    "concept_id": 2,
+    "name": "move_rotate_ccw",
+    "description": "Robot moves arm rotate_ccw",
+    "frequency": 33,
+    "frequency_pct": 3.2,
+    "cluster_size": 2,
+    "variants": [
+      "move_rotate_cw",
+      "move_rotate_ccw"
+    ]
+  },
+  {
+    "concept_id": 3,
+    "name": "approach_object",
+    "description": "Robot arm approaches the target object",
+    "frequency": 98,
+    "frequency_pct": 9.4,
+    "cluster_size": 1,
+    "variants": [
+      "approach_object"
+    ]
+  },
+  {
+    "concept_id": 4,
+    "name": "retract",
+    "description": "Robot retracts after completing the task",
+    "frequency": 33,
+    "frequency_pct": 3.2,
+    "cluster_size": 1,
+    "variants": [
+      "retract"
+    ]
+  },
+  {
+    "concept_id": 5,
+    "name": "stabilize",
+    "description": "Robot holds position to stabilize",
+    "frequency": 14,
+    "frequency_pct": 1.3,
+    "cluster_size": 1,
+    "variants": [
+      "stabilize"
+    ]
+  },
+  {
+    "concept_id": 6,
+    "name": "lift_object",
+    "description": "Robot lifts the grasped object upward",
+    "frequency": 8,
+    "frequency_pct": 0.8,
+    "cluster_size": 1,
+    "variants": [
+      "lift_object"
+    ]
+  },
+  {
+    "concept_id": 7,
+    "name": "lower_object",
+    "description": "Robot lowers the object toward the surface",
+    "frequency": 13,
+    "frequency_pct": 1.3,
+    "cluster_size": 1,
+    "variants": [
+      "lower_object"
+    ]
+  }
+]

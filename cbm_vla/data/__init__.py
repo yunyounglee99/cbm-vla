@@ -25,6 +25,7 @@ from .dataset_builder import (
     SMOLVLA_COMMUNITY_REPOS,
     MAX_ACTION_DIM,
     MAX_STATE_DIM,
+    ACTION_DIM_WITH_DONE,
 )
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "SMOLVLA_COMMUNITY_REPOS",
     "MAX_ACTION_DIM",
     "MAX_STATE_DIM",
+    "ACTION_DIM_WITH_DONE",
 ]

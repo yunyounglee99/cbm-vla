@@ -84,7 +84,13 @@ SMOLVLA_COMMUNITY_REPOS = [
 
 # Multi-Embodiment: 가장 큰 로봇(ALOHA 14-DoF) 기준 패딩
 MAX_ACTION_DIM = 14
-MAX_STATE_DIM = 14
+MAX_STATE_DIM  = 14
+
+# Done flag: 항상 action 배열의 절대 마지막 차원
+# layout: [joint_0 ... joint_{n-1} | pad ... pad | done]
+#          ← actual_action_dim →   ← padding →    ↑ idx=14
+# 로봇 DoF가 몇이든 done은 index 14에 고정
+ACTION_DIM_WITH_DONE = MAX_ACTION_DIM + 1  # = 15
 
 # 알려진 로봇 타입 → action_dim 매핑 (info.json에 없을 때 fallback)
 KNOWN_ROBOT_ACTION_DIMS = {
@@ -109,7 +115,11 @@ class SubDatasetInfo:
     contributor: str            # 컨트리뷰터 이름
     dataset_name: str           # 데이터셋 이름
     community_version: str      # "v1" 또는 "v2"
-    local_root: str             # 로컬 경로 (data/, videos/, meta/ 포함)
+    local_root: str             # 로컬 경로 (data/, videos/, meta/ 포함) - 없으면 빈 문자열
+
+    # Hub 스트리밍용 정보 (로컬 data/ 없을 때 사용)
+    hub_repo_id: str = ""       # e.g. "HuggingFaceVLA/community_dataset_v1"
+    hub_path_prefix: str = ""   # e.g. "00ri/so100_battery"
 
     # 메타 정보 (meta/info.json에서 추출)
     robot_type: str = "unknown"
@@ -211,6 +221,8 @@ def discover_sub_datasets_from_local(
                 dataset_name=dataset_dir.name,
                 community_version=community_version,
                 local_root=str(dataset_dir),
+                hub_repo_id=f"HuggingFaceVLA/community_dataset_{community_version}",
+                hub_path_prefix=f"{contributor}/{dataset_dir.name}",
                 robot_type=robot_type,
                 action_dim=int(action_dim),
                 state_dim=int(state_dim),
@@ -310,7 +322,9 @@ def discover_sub_datasets_from_hub(
                 contributor=contributor,
                 dataset_name=dataset_name,
                 community_version=community_version,
-                local_root=local_root,
+                local_root="",           # Hub 모드에서는 비워둠 (data/ 없음)
+                hub_repo_id=repo_id,
+                hub_path_prefix=f"{contributor}/{dataset_name}",
                 robot_type=robot_type,
                 action_dim=int(action_dim),
                 state_dim=int(state_dim),
@@ -336,6 +350,167 @@ def discover_sub_datasets_from_hub(
 # 2. 개별 sub-dataset 로드
 # ================================================================
 
+def _read_parquet_to_dict(parquet_path_or_file) -> Optional[dict]:
+    """
+    parquet 파일을 dict로 읽습니다.
+    로컬 Path 또는 pyarrow filesystem file object 모두 지원.
+    """
+    try:
+        import pyarrow.parquet as pq
+        table = pq.read_table(parquet_path_or_file)
+        return table.to_pydict()
+    except Exception as e:
+        return None
+
+
+def _parse_episode_dict(
+    df: dict,
+    ep_num: int,
+    global_episode_offset: int,
+    sub_ds: SubDatasetInfo,
+    dataset_root: Optional[str],
+) -> Optional[dict]:
+    """
+    parquet dict → 에피소드 딕셔너리로 변환 (padding 포함)
+    """
+    if "action" not in df or len(df["action"]) == 0:
+        return None
+
+    actions_np = np.array(df["action"], dtype=np.float32)
+    if actions_np.ndim == 1:
+        actions_np = actions_np.reshape(-1, 1)
+    actual_action_dim = actions_np.shape[-1]
+
+    state_key = "observation.state"
+    if state_key in df and len(df[state_key]) > 0:
+        states_np = np.array(df[state_key], dtype=np.float32)
+        if states_np.ndim == 1:
+            states_np = states_np.reshape(-1, 1)
+        actual_state_dim = states_np.shape[-1]
+    else:
+        states_np = np.zeros_like(actions_np)
+        actual_state_dim = actual_action_dim
+
+    # task description
+    task_desc = ""
+    for task_key in ["task", "language_instruction", "task_description"]:
+        if task_key in df and len(df[task_key]) > 0:
+            val = df[task_key][0]
+            if isinstance(val, bytes):
+                task_desc = val.decode("utf-8", errors="ignore")
+            elif isinstance(val, str):
+                task_desc = val
+            else:
+                task_desc = str(val)
+            break
+
+    # ── zero-padding (joint 차원만, done 제외) ──────────────────────────
+    def pad_to(arr, target_dim):
+        d = arr.shape[-1]
+        if d < target_dim:
+            return np.pad(arr, ((0, 0), (0, target_dim - d)))
+        return arr[:, :target_dim]
+
+    T = len(actions_np)
+    actions_padded = pad_to(actions_np, MAX_ACTION_DIM)   # [T, 14]
+    states_padded  = pad_to(states_np,  MAX_STATE_DIM)    # [T, 14]
+
+    # ── done flag: 항상 action 배열의 절대 마지막 차원(index 14) ─────────
+    # 에피소드 마지막 프레임만 1.0, 나머지 0.0
+    # 최종 layout: [j0...j_{n-1} | pad... | done]   shape=[T, 15]
+    # 로봇 DoF가 몇이든 done은 항상 index=MAX_ACTION_DIM 에 고정
+    done_col = np.zeros((T, 1), dtype=np.float32)
+    done_col[-1, 0] = 1.0
+    actions_with_done = np.concatenate([actions_padded, done_col], axis=1)  # [T, 15]
+
+    # ── action_mask [15]: 실제 joint=1, padding=0, done=1 ────────────────
+    action_mask = np.zeros(ACTION_DIM_WITH_DONE, dtype=np.float32)
+    action_mask[:min(actual_action_dim, MAX_ACTION_DIM)] = 1.0
+    action_mask[-1] = 1.0   # done flag 는 항상 유효
+
+    # ── actions_raw: segmentation 전용 (패딩·done 없이 실제 관절만) ──────
+    raw_actions_for_seg = actions_np[:, :actual_action_dim]   # [T, actual_action_dim]
+
+    return {
+        "global_episode_id":  global_episode_offset + ep_num,
+        "local_episode_id":   ep_num,
+        "contributor":         sub_ds.contributor,
+        "dataset_name":        sub_ds.dataset_name,
+        "community_version":   sub_ds.community_version,
+        "repo_id":             f"{sub_ds.contributor}/{sub_ds.dataset_name}",
+        "robot_type":          sub_ds.robot_type,
+        "task_description":    task_desc,
+        "actions":             actions_with_done,    # [T, 15]  joints+pad+done
+        "actions_raw":         raw_actions_for_seg,  # [T, D]   segmentation 전용
+        "states":              states_padded,          # [T, 14]
+        "action_mask":         action_mask,            # [15]  joint=1,pad=0,done=1
+        "actual_action_dim":   actual_action_dim,
+        "actual_state_dim":    actual_state_dim,
+        "num_frames":          T,
+        "fps":                 sub_ds.fps,
+        "dataset_root":        dataset_root,
+        "camera_keys":         sub_ds.camera_keys,
+    }
+
+
+def _collect_episode_parquet_files_local(data_dir: Path) -> Dict[int, Path]:
+    """로컬 data/ 디렉토리에서 episode_*.parquet 파일 수집"""
+    episode_files = {}
+    for pf in sorted(data_dir.rglob("*.parquet")):
+        name = pf.stem
+        if name.startswith("episode_"):
+            try:
+                ep_num = int(name.replace("episode_", ""))
+                episode_files[ep_num] = pf
+            except ValueError:
+                continue
+    return episode_files
+
+
+def _collect_episode_parquet_files_hub(
+    hub_repo_id: str,
+    hub_path_prefix: str,
+) -> Dict[int, str]:
+    """
+    HfFileSystem으로 Hub의 data/ 경로에서 episode_*.parquet 목록 수집.
+    반환값: {ep_num: hf_path}
+    """
+    try:
+        from huggingface_hub import HfFileSystem
+        fs = HfFileSystem()
+
+        # HF path 형식: datasets/HuggingFaceVLA/community_dataset_v1/contributor/dataset/data/
+        base = f"datasets/{hub_repo_id}/{hub_path_prefix}/data"
+
+        # glob으로 parquet 파일 탐색 (chunk 하위 포함)
+        patterns = [
+            f"{base}/*.parquet",
+            f"{base}/**/*.parquet",
+        ]
+        found = []
+        for pat in patterns:
+            try:
+                found.extend(fs.glob(pat))
+            except Exception:
+                continue
+
+        episode_files = {}
+        for hf_path in sorted(found):
+            name = Path(hf_path).stem
+            if name.startswith("episode_"):
+                try:
+                    ep_num = int(name.replace("episode_", ""))
+                    episode_files[ep_num] = hf_path
+                except ValueError:
+                    continue
+
+        return episode_files
+
+    except Exception as e:
+        print(f"    [WARNING] HfFileSystem glob failed: {e}")
+        return {}
+
+
 def load_episodes_from_sub_dataset(
     sub_ds: SubDatasetInfo,
     max_episodes: Optional[int] = None,
@@ -343,6 +518,9 @@ def load_episodes_from_sub_dataset(
 ) -> List[dict]:
     """
     개별 sub-dataset(LeRobot 형식)에서 에피소드를 로드합니다.
+
+    로컬 data/ 디렉토리가 있으면 로컬에서 읽고,
+    없으면 HfFileSystem으로 Hub에서 직접 스트리밍 읽습니다.
 
     Args:
         sub_ds: SubDatasetInfo
@@ -352,149 +530,82 @@ def load_episodes_from_sub_dataset(
     Returns:
         에피소드 딕셔너리 리스트
     """
-    episodes = []
-    local_root = Path(sub_ds.local_root)
-
-    # data/ 디렉토리의 parquet 파일 목록
-    data_dir = local_root / "data"
-    if not data_dir.exists():
-        print(f"    [WARNING] No data/ directory: {local_root}")
-        return []
-
-    # parquet 파일 수집 (chunk-xxx 하위 포함)
-    parquet_files = sorted(data_dir.rglob("*.parquet"))
-    if not parquet_files:
-        print(f"    [WARNING] No parquet files in: {data_dir}")
-        return []
-
     try:
         import pyarrow.parquet as pq
-        import pyarrow as pa
     except ImportError:
-        print("    [WARNING] pyarrow not installed. pip install pyarrow")
+        print("    [WARNING] pyarrow not installed: pip install pyarrow")
         return _fallback_dummy_episodes(sub_ds, max_episodes or 5, global_episode_offset)
 
-    # 에피소드별로 parquet 그룹화
-    # LeRobot v2: data/chunk-000/episode_000000.parquet
-    # LeRobot v2.1+: data/episode_000000.parquet
-    episode_files = {}
-    for pf in parquet_files:
-        name = pf.stem  # e.g., "episode_000000"
-        if name.startswith("episode_"):
-            ep_num = int(name.replace("episode_", ""))
-            episode_files[ep_num] = pf
+    # ── 로컬 vs Hub 분기 ──────────────────────────────────────────
+    use_local = bool(sub_ds.local_root) and (Path(sub_ds.local_root) / "data").exists()
+    use_hub   = bool(sub_ds.hub_repo_id) and bool(sub_ds.hub_path_prefix)
 
-    if not episode_files:
-        print(f"    [WARNING] No episode_*.parquet files found in {data_dir}")
-        return []
+    if use_local:
+        # ── 로컬 읽기 ────────────────────────────────────────────
+        data_dir = Path(sub_ds.local_root) / "data"
+        episode_files = _collect_episode_parquet_files_local(data_dir)
 
-    ep_nums = sorted(episode_files.keys())
-    if max_episodes:
-        ep_nums = ep_nums[:max_episodes]
+        if not episode_files:
+            return []
 
-    # videos/ 디렉토리 확인
-    videos_dir = local_root / "videos"
+        ep_nums = sorted(episode_files.keys())
+        if max_episodes:
+            ep_nums = ep_nums[:max_episodes]
 
-    for ep_num in ep_nums:
-        pf = episode_files[ep_num]
+        videos_dir = Path(sub_ds.local_root) / "videos"
+        dataset_root = str(sub_ds.local_root) if videos_dir.exists() else None
+
+        episodes = []
+        for ep_num in ep_nums:
+            df = _read_parquet_to_dict(episode_files[ep_num])
+            if df is None:
+                continue
+            ep = _parse_episode_dict(df, ep_num, global_episode_offset, sub_ds, dataset_root)
+            if ep:
+                episodes.append(ep)
+        return episodes
+
+    elif use_hub:
+        # ── Hub 스트리밍 읽기 (HfFileSystem) ────────────────────
         try:
-            table = pq.read_table(pf)
-            df = table.to_pydict()
+            from huggingface_hub import HfFileSystem
+            fs = HfFileSystem()
+        except ImportError:
+            print("    [WARNING] huggingface_hub not installed")
+            return _fallback_dummy_episodes(sub_ds, max_episodes or 5, global_episode_offset)
 
-            # action 추출
-            if "action" not in df:
+        episode_files = _collect_episode_parquet_files_hub(
+            hub_repo_id=sub_ds.hub_repo_id,
+            hub_path_prefix=sub_ds.hub_path_prefix,
+        )
+
+        if not episode_files:
+            return []
+
+        ep_nums = sorted(episode_files.keys())
+        if max_episodes:
+            ep_nums = ep_nums[:max_episodes]
+
+        episodes = []
+        for ep_num in ep_nums:
+            hf_path = episode_files[ep_num]
+            try:
+                with fs.open(hf_path, "rb") as f:
+                    import pyarrow.parquet as pq
+                    table = pq.read_table(f)
+                    df = table.to_pydict()
+            except Exception as e:
+                print(f"    [WARNING] Cannot read {hf_path}: {e}")
                 continue
 
-            actions_raw = df["action"]
-            if len(actions_raw) == 0:
-                continue
+            ep = _parse_episode_dict(df, ep_num, global_episode_offset, sub_ds, dataset_root=None)
+            if ep:
+                episodes.append(ep)
 
-            # list of list → numpy
-            actions_np = np.array(actions_raw, dtype=np.float32)
-            if actions_np.ndim == 1:
-                actions_np = actions_np.reshape(-1, 1)
+        return episodes
 
-            actual_action_dim = actions_np.shape[-1]
-
-            # state 추출
-            state_key = "observation.state"
-            if state_key in df and len(df[state_key]) > 0:
-                states_np = np.array(df[state_key], dtype=np.float32)
-                if states_np.ndim == 1:
-                    states_np = states_np.reshape(-1, 1)
-                actual_state_dim = states_np.shape[-1]
-            else:
-                states_np = np.zeros_like(actions_np)
-                actual_state_dim = actual_action_dim
-
-            # Task description 추출
-            task_desc = ""
-            for task_key in ["task", "language_instruction", "task_description"]:
-                if task_key in df and len(df[task_key]) > 0:
-                    val = df[task_key][0]
-                    if isinstance(val, (str, bytes)):
-                        task_desc = val.decode() if isinstance(val, bytes) else val
-                        break
-                    elif hasattr(val, '__str__'):
-                        task_desc = str(val)
-                        break
-
-            # Multi-Embodiment Zero-Padding
-            action_pad = MAX_ACTION_DIM - actual_action_dim
-            if action_pad > 0:
-                actions_padded = np.pad(
-                    actions_np, ((0, 0), (0, action_pad)),
-                    mode='constant', constant_values=0.0
-                )
-            elif action_pad < 0:
-                # action_dim이 MAX_ACTION_DIM보다 큰 경우 (rare)
-                actions_padded = actions_np[:, :MAX_ACTION_DIM]
-            else:
-                actions_padded = actions_np
-
-            state_pad = MAX_STATE_DIM - actual_state_dim
-            if state_pad > 0:
-                states_padded = np.pad(
-                    states_np, ((0, 0), (0, state_pad)),
-                    mode='constant', constant_values=0.0
-                )
-            elif state_pad < 0:
-                states_padded = states_np[:, :MAX_STATE_DIM]
-            else:
-                states_padded = states_np
-
-            # Action mask (실제 관절 = 1.0, 패딩 = 0.0)
-            action_mask = np.zeros(MAX_ACTION_DIM, dtype=np.float32)
-            action_mask[:min(actual_action_dim, MAX_ACTION_DIM)] = 1.0
-
-            # 비디오 디렉토리 경로 구성 (이미지 추출용)
-            dataset_root = str(local_root) if videos_dir.exists() else None
-
-            episodes.append({
-                "global_episode_id": global_episode_offset + ep_num,
-                "local_episode_id": ep_num,
-                "contributor": sub_ds.contributor,
-                "dataset_name": sub_ds.dataset_name,
-                "community_version": sub_ds.community_version,
-                "repo_id": f"{sub_ds.contributor}/{sub_ds.dataset_name}",
-                "robot_type": sub_ds.robot_type,
-                "task_description": task_desc,
-                "actions": actions_padded,        # [T, MAX_ACTION_DIM]
-                "states": states_padded,           # [T, MAX_STATE_DIM]
-                "action_mask": action_mask,        # [MAX_ACTION_DIM]
-                "actual_action_dim": actual_action_dim,
-                "actual_state_dim": actual_state_dim,
-                "num_frames": len(actions_np),
-                "fps": sub_ds.fps,
-                "dataset_root": dataset_root,
-                "camera_keys": sub_ds.camera_keys,
-            })
-
-        except Exception as e:
-            print(f"    [WARNING] Failed to load episode {ep_num} from {pf}: {e}")
-            continue
-
-    return episodes
+    else:
+        return []
 
 
 def _fallback_dummy_episodes(
@@ -514,15 +625,21 @@ def _fallback_dummy_episodes(
         t1, t2 = num_frames // 3, 2 * num_frames // 3
         actions[t1:t2, -1] = 1.0
 
-        # padding
+        # padding (joint 차원만)
         pad = MAX_ACTION_DIM - action_dim
         if pad > 0:
             actions_padded = np.pad(actions, ((0, 0), (0, pad)))
         else:
             actions_padded = actions[:, :MAX_ACTION_DIM]
 
-        action_mask = np.zeros(MAX_ACTION_DIM, dtype=np.float32)
+        # done flag 추가 (마지막 프레임 = 1.0)
+        done_col = np.zeros((num_frames, 1), dtype=np.float32)
+        done_col[-1, 0] = 1.0
+        actions_with_done = np.concatenate([actions_padded, done_col], axis=1)  # [T, 15]
+
+        action_mask = np.zeros(ACTION_DIM_WITH_DONE, dtype=np.float32)
         action_mask[:min(action_dim, MAX_ACTION_DIM)] = 1.0
+        action_mask[-1] = 1.0   # done flag
 
         episodes.append({
             "global_episode_id": global_offset + i,
@@ -533,13 +650,14 @@ def _fallback_dummy_episodes(
             "repo_id": f"{sub_ds.contributor}/{sub_ds.dataset_name}",
             "robot_type": sub_ds.robot_type,
             "task_description": f"Manipulation task by {sub_ds.contributor}",
-            "actions": actions_padded,
-            "states": actions_padded.copy(),
-            "action_mask": action_mask,
+            "actions":     actions_with_done,    # [T, 15]
+            "actions_raw": actions,              # [T, action_dim] segmentation 전용
+            "states":      actions_padded.copy(),
+            "action_mask": action_mask,          # [15]
             "actual_action_dim": action_dim,
-            "actual_state_dim": action_dim,
-            "num_frames": num_frames,
-            "fps": sub_ds.fps,
+            "actual_state_dim":  action_dim,
+            "num_frames":  num_frames,
+            "fps":         sub_ds.fps,
             "dataset_root": None,
             "camera_keys": sub_ds.camera_keys,
         })
@@ -748,8 +866,10 @@ class SmolVLACommunityDatasetBuilder:
                 if idx % 1000 == 0:
                     print(f"  Segmenting episode {idx}/{len(all_episodes)}...")
 
+                # actions_raw: 패딩·done 제거한 실제 관절만 사용
+                # → gripper 감지, 속도/방향 분석이 패딩 0값에 오염되지 않음
                 seg_result = self.segmenter.segment_episode(
-                    actions=ep["actions"],
+                    actions=ep["actions_raw"],
                     episode_id=ep["global_episode_id"],
                     task_description=ep["task_description"],
                     dataset_name=ep["repo_id"],
@@ -884,7 +1004,7 @@ class SmolVLACommunityDatasetBuilder:
             "total_training_entries": len(training_entries),
             "total_segments": total_segments,
             "num_concepts": len(concept_pool),
-            "max_action_dim": MAX_ACTION_DIM,
+            "max_action_dim": ACTION_DIM_WITH_DONE,   # 15 (14 joints + done)
             "max_state_dim": MAX_STATE_DIM,
             "robot_type_distribution": dict(robot_stats),
             "action_dim_distribution": {str(k): v for k, v in action_dim_stats.items()},
