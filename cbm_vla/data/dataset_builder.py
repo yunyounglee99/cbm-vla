@@ -1,45 +1,59 @@
 """
-SO-101 Concept Dataset Builder
-================================
+CBM-VLA Community Dataset Builder
+===================================
 
-HuggingFace LeRobot community dataset (v2/v3)를 로드하여
-SO-100/SO-101 호환 데이터셋(action_dim=6)을 필터링하고,
-auto_segmentation → llm_annotation → t5_refinement
-전체 파이프라인을 실행하여 CBM-VLA 학습용 concept 데이터셋을 구축합니다.
+SmolVLA가 학습에 사용한 정확히 동일한 데이터셋을 로드하여
+auto_segmentation → llm_annotation → t5_refinement 파이프라인을 실행합니다.
 
-=== SO-100 / SO-101 스펙 ===
-    - 5 arm joints: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll
-    - 1 gripper: gripper
-    - action_dim = 6, state_dim = 6
-    - FPS: 보통 30
-    - robot_type: "so100", "so100_follower", "so101", "so101_follower"
+=== SmolVLA 학습 데이터셋 (정확한 출처) ===
+    - Community Dataset v1: HuggingFaceVLA/community_dataset_v1
+        · 128개 데이터셋, 11,100 에피소드, 5.1M 프레임, 119.3 GB
+        · 55명의 컨트리뷰터
+    - Community Dataset v2: HuggingFaceVLA/community_dataset_v2
+        · 340개 데이터셋, 6,300 에피소드, 5.0M 프레임, 59 GB
+        · 117명의 컨트리뷰터
+    총합: 468개 데이터셋, ~17,400 에피소드, ~10M 프레임
 
-=== Pipeline 단계 ===
-    1. HuggingFace Hub에서 SO-100/SO-101 LeRobot 데이터셋 검색 & 로드
-    2. AutoSegmenter로 에피소드별 세그먼트 분할
-    3. GeminiConceptAnnotator로 각 세그먼트에 concept annotation 생성
-    4. ConceptRefiner로 raw concept → 정제된 concept pool 구축
-    5. 최종 concept 데이터셋 저장 (학습 루프에서 로드 가능한 형태)
+=== 데이터셋 구조 ===
+    community_dataset_v1/
+    ├── contributor_name/
+    │   ├── dataset_name/
+    │   │   ├── data/          # Parquet 파일
+    │   │   ├── videos/        # MP4 파일
+    │   │   └── meta/
+    │   │       └── info.json  # 로봇 타입, action_dim 등
+    │   └── ...
+    └── ...
+
+=== Multi-Embodiment 설계 ===
+    - SO-100/SO-101 (6-DoF), Koch (6-DoF), ALOHA (14-DoF) 등 모두 포함
+    - 가장 큰 로봇(14-DoF) 기준으로 zero-padding
+    - action_mask로 실제 관절과 패딩 구분
 
 === 출력 데이터 구조 ===
     {
-        "concept_pool": [...],           # 정제된 concept 풀 (20~50개)
-        "dataset": [...],                # 프레임별 concept mapping
-        "dataset_info": {                # 메타데이터
-            "source_repos": [...],
+        "concept_pool": [...],       # 정제된 concept 풀 (20~50개)
+        "training_entries": [...],   # 에피소드별 concept 매핑
+        "dataset_info": {            # 메타데이터
+            "source": "HuggingFaceVLA/community_dataset_v1+v2",
+            "total_sub_datasets": int,
             "total_episodes": int,
             "total_frames": int,
-            "robot_type": str,
-            "action_dim": int,
         }
     }
 
 Usage:
-    python -m cbm_vla.data.so101_dataset_builder \\
-        --repo_ids lerobot/svla_so101_pickplace lerobot/svla_so100_stacking \\
-        --output_dir ./data/so101_concept_dataset \\
-        --max_episodes_per_repo 100 \\
-        --gemini_api_key YOUR_API_KEY
+    # 전체 데이터셋 (SmolVLA 학습과 동일)
+    python -m cbm_vla.data.dataset_builder \\
+        --output_dir ./data/smolvla_concept_dataset \\
+        --gemini_api_key YOUR_KEY \\
+        --local_dir /path/to/downloaded/datasets
+
+    # 소규모 테스트 (에피소드 수 제한)
+    python -m cbm_vla.data.dataset_builder \\
+        --output_dir ./data/test_dataset \\
+        --max_episodes_per_sub_dataset 10 \\
+        --skip_annotation
 """
 
 import json
@@ -53,448 +67,483 @@ from dataclasses import dataclass, asdict, field
 from collections import defaultdict
 import time
 
-# CBM-VLA data modules
 from .auto_segmentation import AutoSegmenter
 from .llm_annotation import GeminiConceptAnnotator
 from .t5_refinement import ConceptRefiner
 
 
 # ================================================================
-# SO-100 / SO-101 호환 데이터셋 레지스트리
+# SmolVLA 학습 데이터셋 정보 (공식 출처)
 # ================================================================
 
-# LeRobot 공식 + 커뮤니티 데이터셋 중 SO-100/SO-101 호환
-# robot_type 기준으로 자동 필터링하지만, 알려진 repo는 미리 등록
-KNOWN_SO_REPOS = [
-    # === LeRobot 공식 SmolVLA 데이터셋 ===
-    "lerobot/svla_so101_pickplace",
-    "lerobot/svla_so100_stacking",
-    "lerobot/svla_so100_sorting",
-    # === 커뮤니티에서 자주 사용하는 데이터셋 (예시) ===
-    # 사용자가 추가로 등록 가능
+# SmolVLA pretraining에 사용된 정확한 HuggingFace 레포 ID
+SMOLVLA_COMMUNITY_REPOS = [
+    "HuggingFaceVLA/community_dataset_v1",  # 128 datasets, 11.1K episodes
+    "HuggingFaceVLA/community_dataset_v2",  # 340 datasets, 6.3K  episodes
 ]
 
-# SO-100/SO-101 호환 robot_type 목록
-SO_COMPATIBLE_ROBOT_TYPES = {
-    "so100",
-    "so100_follower",
-    "so101",
-    "so101_follower",
-    "so_arm100",
+# Multi-Embodiment: 가장 큰 로봇(ALOHA 14-DoF) 기준 패딩
+MAX_ACTION_DIM = 14
+MAX_STATE_DIM = 14
+
+# 알려진 로봇 타입 → action_dim 매핑 (info.json에 없을 때 fallback)
+KNOWN_ROBOT_ACTION_DIMS = {
+    "so100": 6, "so100_follower": 6,
+    "so101": 6, "so101_follower": 6,
+    "so_arm100": 6,
+    "koch": 6, "koch_follower": 6,
+    "lekiwi": 6,
+    "aloha": 14, "aloha_stationary": 14,
+    "stretch": 3,
+    "panda": 7, "franka": 7,
+    "xarm": 6, "xarm6": 6, "xarm7": 7,
+    "ur5": 6, "ur5e": 6,
+    "gr1": 14,
 }
-
-# SO-100/SO-101 관절 이름 (6-DOF: 5 joints + 1 gripper)
-SO101_JOINT_NAMES = [
-    "shoulder_pan",
-    "shoulder_lift",
-    "elbow_flex",
-    "wrist_flex",
-    "wrist_roll",
-    "gripper",
-]
-
-SO101_ACTION_DIM = 6   # 5 arm joints + 1 gripper
-SO101_STATE_DIM = 6    # 동일
-
-# ================================================================
-# Multi-Embodiment 설정
-# ================================================================
-MAX_ACTION_DIM = 14  # ALOHA(14-DoF) 등 가장 큰 로봇 기준
-MAX_STATE_DIM = 14   # 상태 차원도 동일하게 맞춤
 
 
 @dataclass
-class DatasetInfo:
-    """데이터셋 메타 정보"""
-    repo_id: str
-    robot_type: str
-    action_dim: int
-    state_dim: int
-    total_episodes: int
-    total_frames: int
-    fps: int
-    codebase_version: str
+class SubDatasetInfo:
+    """community_dataset 내 개별 sub-dataset 정보"""
+    # 식별자
+    contributor: str            # 컨트리뷰터 이름
+    dataset_name: str           # 데이터셋 이름
+    community_version: str      # "v1" 또는 "v2"
+    local_root: str             # 로컬 경로 (data/, videos/, meta/ 포함)
+
+    # 메타 정보 (meta/info.json에서 추출)
+    robot_type: str = "unknown"
+    action_dim: int = 6
+    state_dim: int = 6
+    total_episodes: int = 0
+    total_frames: int = 0
+    fps: int = 30
+    codebase_version: str = "unknown"
     camera_keys: List[str] = field(default_factory=list)
-    task_description: str = ""
 
 
 # ================================================================
-# 1. 데이터셋 검색 & 로드
+# 1. community_dataset 구조 탐색 및 sub-dataset 목록 추출
 # ================================================================
 
-def fetch_dataset_info(repo_id: str) -> Optional[DatasetInfo]:
+def discover_sub_datasets_from_local(
+    local_dir: str,
+    community_version: str,
+    max_sub_datasets: Optional[int] = None,
+) -> List[SubDatasetInfo]:
     """
-    HuggingFace Hub에서 LeRobot 데이터셋의 meta/info.json을 읽어
-    SO-100/SO-101 호환 여부를 확인합니다.
-    
+    로컬에 다운로드된 community_dataset에서 모든 sub-dataset을 탐색합니다.
+
+    구조:
+        local_dir/
+        ├── contributor1/
+        │   ├── dataset_name_1/
+        │   │   ├── meta/info.json  ← 이게 있으면 LeRobot 데이터셋
+        │   │   ├── data/
+        │   │   └── videos/
+        │   └── dataset_name_2/
+        └── contributor2/
+            └── dataset_name_3/
+
     Args:
-        repo_id: HuggingFace dataset repo ID (예: "lerobot/svla_so101_pickplace")
-        
+        local_dir: 다운로드된 community_dataset 디렉토리 경로
+        community_version: "v1" 또는 "v2"
+        max_sub_datasets: 최대 sub-dataset 수 제한 (None = 전체)
+
     Returns:
-        DatasetInfo if compatible, None otherwise
+        SubDatasetInfo 리스트
     """
-    try:
-        from huggingface_hub import hf_hub_download
-        
-        # meta/info.json 다운로드
-        info_path = hf_hub_download(
-            repo_id=repo_id,
-            filename="meta/info.json",
-            repo_type="dataset",
-        )
-        
-        with open(info_path) as f:
-            info = json.load(f)
-        
-        robot_type = info.get("robot_type", "unknown")
-        features = info.get("features", {})
-        
-        # action dim 확인
-        action_info = features.get("action", {})
-        action_dim = action_info.get("shape", [0])
-        if isinstance(action_dim, list):
-            action_dim = action_dim[0]
-        
-        # state dim 확인
-        state_info = features.get("observation.state", {})
-        state_dim = state_info.get("shape", [0])
-        if isinstance(state_dim, list):
-            state_dim = state_dim[0]
-        
-        # 카메라 키 수집
-        camera_keys = [
-            k for k in features.keys()
-            if k.startswith("observation.images")
-        ]
-        
-        return DatasetInfo(
-            repo_id=repo_id,
-            robot_type=robot_type,
-            action_dim=action_dim,
-            state_dim=state_dim,
-            total_episodes=info.get("total_episodes", 0),
-            total_frames=info.get("total_frames", 0),
-            fps=info.get("fps", 30),
-            codebase_version=info.get("codebase_version", "unknown"),
-            camera_keys=camera_keys,
-        )
-        
-    except Exception as e:
-        print(f"  [WARNING] Failed to fetch info for {repo_id}: {e}")
-        return None
+    root = Path(local_dir)
+    if not root.exists():
+        print(f"  [ERROR] Directory not found: {local_dir}")
+        return []
 
+    sub_datasets = []
 
-def is_so_compatible(info: DatasetInfo) -> bool:
-    """SO-100/SO-101 호환 여부 판단"""
-    # robot_type 기반 판단
-    rt = info.robot_type.lower().replace("-", "").replace("_", "")
-    for compatible in SO_COMPATIBLE_ROBOT_TYPES:
-        if compatible.replace("_", "") in rt:
-            return True
-    
-    # action_dim 기반 보조 판단 (SO-100/101은 6-DOF)
-    if info.action_dim == SO101_ACTION_DIM:
-        return True
-    
-    return False
-
-
-def discover_so_datasets(
-    repo_ids: Optional[List[str]] = None,
-    search_hub: bool = False,
-    max_search: int = 50,
-) -> List[DatasetInfo]:
-    """
-    SO-100/SO-101 호환 데이터셋을 검색합니다.
-    
-    Args:
-        repo_ids: 직접 지정한 repo ID 리스트 (없으면 KNOWN_SO_REPOS 사용)
-        search_hub: True면 HF Hub에서 추가 검색 (API 사용)
-        max_search: Hub 검색 시 최대 결과 수
-        
-    Returns:
-        호환 데이터셋 정보 리스트
-    """
-    candidates = list(repo_ids or KNOWN_SO_REPOS)
-    
-    # Hub에서 추가 검색
-    if search_hub:
-        try:
-            from huggingface_hub import HfApi
-            api = HfApi()
-            
-            # "so100" 또는 "so101" 태그로 검색
-            for query in ["so100 lerobot", "so101 lerobot"]:
-                results = api.list_datasets(
-                    search=query,
-                    limit=max_search,
-                    sort="downloads",
-                    direction=-1,
-                )
-                for ds in results:
-                    if ds.id not in candidates:
-                        candidates.append(ds.id)
-            
-            print(f"  Hub search found {len(candidates)} candidate datasets")
-            
-        except Exception as e:
-            print(f"  [WARNING] Hub search failed: {e}")
-    
-    # 각 후보에 대해 info 확인
-    compatible = []
-    for repo_id in candidates:
-        print(f"  Checking {repo_id}...", end=" ")
-        info = fetch_dataset_info(repo_id)
-        
-        if info is None:
-            print("SKIP (failed to fetch)")
+    # contributor 폴더 순회
+    for contributor_dir in sorted(root.iterdir()):
+        if not contributor_dir.is_dir():
             continue
-        
-        if is_so_compatible(info):
-            print(f"OK (robot={info.robot_type}, action_dim={info.action_dim}, "
-                  f"episodes={info.total_episodes}, frames={info.total_frames})")
-            compatible.append(info)
-        else:
-            print(f"SKIP (robot={info.robot_type}, action_dim={info.action_dim})")
-    
-    return compatible
+        if contributor_dir.name.startswith('.'):
+            continue
 
+        contributor = contributor_dir.name
 
-# ================================================================
-# 2. 데이터 로드 & 추출
-# ================================================================
-
-def load_episodes_from_repo(
-    repo_id: str,
-    dataset_info: DatasetInfo,
-    max_episodes: Optional[int] = None,
-    cache_dir: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    LeRobot 데이터셋에서 에피소드별 action, state, 이미지 경로를 추출합니다.
-    
-    Args:
-        repo_id: HuggingFace dataset repo ID
-        dataset_info: 사전 확인된 데이터셋 정보
-        max_episodes: 최대 로드 에피소드 수
-        cache_dir: 로컬 캐시 디렉토리
-        
-    Returns:
-        {
-            "episodes": [
-                {
-                    "episode_id": int,
-                    "actions": np.ndarray [T, action_dim],
-                    "states": np.ndarray [T, state_dim],
-                    "task_description": str,
-                    "num_frames": int,
-                    "fps": int,
-                    "dataset_root": str,   # 이미지 접근용 로컬 경로
-                }
-            ],
-            "dataset_info": DatasetInfo,
-        }
-    """
-    episodes = []
-    
-    try:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
-        
-        print(f"\n  Loading LeRobotDataset: {repo_id}")
-        kwargs = {"repo_id": repo_id}
-        if cache_dir:
-            kwargs["root"] = cache_dir
-        
-        dataset = LeRobotDataset(**kwargs)
-        
-        # 에피소드 수 결정
-        num_episodes = dataset_info.total_episodes
-        if max_episodes:
-            num_episodes = min(num_episodes, max_episodes)
-        
-        print(f"  Processing {num_episodes}/{dataset_info.total_episodes} episodes...")
-        
-        # 에피소드별 데이터 추출
-        for ep_idx in range(num_episodes):
-            if ep_idx % 50 == 0:
-                print(f"    Episode {ep_idx}/{num_episodes}...")
-            
-            try:
-                # LeRobot 최신 버전(0.5.0+) 및 다양한 포맷 호환 인덱스 추출 로직
-                if hasattr(dataset, 'meta') and hasattr(dataset.meta, 'episodes'):
-                    episodes_meta = dataset.meta.episodes
-                    
-                    # 'hasattr' 대신 딕셔너리/데이터셋 Key 존재 여부('in')로 확인합니다.
-                    if "dataset_from_index" in episodes_meta:
-                        from_idx = episodes_meta["dataset_from_index"][ep_idx]
-                        to_idx = episodes_meta["dataset_to_index"][ep_idx]
-                    elif "from_index" in episodes_meta:
-                        from_idx = episodes_meta["from_index"][ep_idx]
-                        to_idx = episodes_meta["to_index"][ep_idx]
-                    elif "from" in episodes_meta:
-                        from_idx = episodes_meta["from"][ep_idx]
-                        to_idx = episodes_meta["to"][ep_idx]
-                    else:
-                        print(f"    [WARNING] Cannot find index keys in meta.episodes, skipping ep {ep_idx}")
-                        continue
-                else:
-                    print(f"    [WARNING] Cannot find episode boundaries, skipping ep {ep_idx}")
-                    continue
-                
-                # 안전장치: Tensor나 Numpy 형식일 경우 순수 정수(int)로 변환
-                if hasattr(from_idx, 'item'): from_idx = from_idx.item()
-                if hasattr(to_idx, 'item'): to_idx = to_idx.item()
-                
-                # 프레임별 데이터 수집
-                actions = []
-                states = []
-                task_desc = ""
-                
-                for frame_idx in range(from_idx, to_idx):
-                    item = dataset[frame_idx]
-                    
-                    # Action
-                    action = item["action"]
-                    if hasattr(action, 'numpy'):
-                        action = action.numpy()
-                    actions.append(action)
-                    
-                    # State (observation.state)
-                    if "observation.state" in item:
-                        state = item["observation.state"]
-                        if hasattr(state, 'numpy'):
-                            state = state.numpy()
-                        states.append(state)
-                    
-                    # Task description (첫 프레임에서만)
-                    if frame_idx == from_idx:
-                        if "task" in item:
-                            task_desc = item["task"]
-                            if hasattr(task_desc, 'item'):
-                                task_desc = str(task_desc)
-                        elif "language_instruction" in item:
-                            task_desc = item["language_instruction"]
-                            if hasattr(task_desc, 'item'):
-                                task_desc = str(task_desc)
-                
-                if not actions:
-                    continue
-                
-                raw_actions_array = np.stack(actions)
-                raw_states_array = np.stack(states) if states else np.zeros_like(raw_actions_array)
-                
-                # --- [핵심] Multi-Embodiment Zero-Padding ---
-                actual_action_dim = raw_actions_array.shape[-1]
-                actual_state_dim = raw_states_array.shape[-1]
-                
-                # Action 패딩
-                action_pad_size = MAX_ACTION_DIM - actual_action_dim
-                if action_pad_size > 0:
-                    # (0,0): 프레임 축은 그대로 유지, (0, action_pad_size): 차원 축 뒤쪽에 0 추가
-                    actions_array = np.pad(raw_actions_array, ((0, 0), (0, action_pad_size)), mode='constant', constant_values=0.0)
-                else:
-                    actions_array = raw_actions_array
-                
-                # State 패딩 (상태 차원도 맞춰주어야 모델에러가 안 남)
-                state_pad_size = MAX_STATE_DIM - actual_state_dim
-                if state_pad_size > 0:
-                    states_array = np.pad(raw_states_array, ((0, 0), (0, state_pad_size)), mode='constant', constant_values=0.0)
-                else:
-                    states_array = raw_states_array
-                    
-                # --- [핵심] Action Mask 생성 ---
-                # 실제 로봇의 관절이 있는 곳은 1.0, 패딩으로 채운 가짜 관절은 0.0
-                action_mask = np.zeros(MAX_ACTION_DIM, dtype=np.float32)
-                action_mask[:actual_action_dim] = 1.0
-                
-                # 데이터셋 로컬 경로 (이미지 접근용)
-                dataset_root = None
-                if hasattr(dataset, 'root'):
-                    dataset_root = str(dataset.root)
-                elif hasattr(dataset, 'videos_dir'):
-                    dataset_root = str(Path(dataset.videos_dir).parent)
-                
-                episodes.append({
-                    "episode_id": ep_idx,
-                    "actions": actions_array,       # 패딩된 [T, 14] 텐서
-                    "states": states_array,         # 패딩된 [T, 14] 텐서
-                    "action_mask": action_mask,     # [14] 마스크 (예: [1,1,1,1,1,1,0,0,0,0,0,0,0,0])
-                    "actual_action_dim": actual_action_dim, # 원래 차원 (예: 6)
-                    "robot_type": dataset_info.robot_type,  # 로봇 종류 (예: "so101")
-                    "task_description": task_desc,
-                    "num_frames": len(actions),
-                    "fps": dataset_info.fps,
-                    "dataset_root": dataset_root,
-                    "repo_id": repo_id,
-                })
-                
-            except Exception as e:
-                print(f"    [WARNING] Failed to load episode {ep_idx}: {e}")
+        # dataset 폴더 순회
+        for dataset_dir in sorted(contributor_dir.iterdir()):
+            if not dataset_dir.is_dir():
                 continue
-        
-        print(f"  Loaded {len(episodes)} episodes from {repo_id}")
-        
-    except ImportError:
-        print("  [WARNING] lerobot not installed. Generating dummy data.")
-        episodes = _generate_dummy_episodes(
-            num_episodes=max_episodes or 10,
-            action_dim=dataset_info.action_dim,
-            repo_id=repo_id,
-        )
+            if dataset_dir.name.startswith('.'):
+                continue
+
+            # meta/info.json 존재 확인 → LeRobot 데이터셋 여부 판단
+            info_path = dataset_dir / "meta" / "info.json"
+            if not info_path.exists():
+                # 일부 구조는 data/ 폴더만 있을 수 있음 - 스킵
+                continue
+
+            # info.json 파싱
+            try:
+                with open(info_path) as f:
+                    info = json.load(f)
+            except Exception as e:
+                print(f"  [WARNING] Cannot read {info_path}: {e}")
+                continue
+
+            robot_type = info.get("robot_type", "unknown")
+
+            # action_dim 추출
+            features = info.get("features", {})
+            action_info = features.get("action", {})
+            action_shape = action_info.get("shape", [6])
+            action_dim = action_shape[0] if isinstance(action_shape, list) else action_shape
+
+            # state_dim 추출
+            state_info = features.get("observation.state", {})
+            state_shape = state_info.get("shape", [action_dim])
+            state_dim = state_shape[0] if isinstance(state_shape, list) else state_shape
+
+            # 카메라 키
+            camera_keys = [k for k in features if k.startswith("observation.images")]
+
+            sub_datasets.append(SubDatasetInfo(
+                contributor=contributor,
+                dataset_name=dataset_dir.name,
+                community_version=community_version,
+                local_root=str(dataset_dir),
+                robot_type=robot_type,
+                action_dim=int(action_dim),
+                state_dim=int(state_dim),
+                total_episodes=info.get("total_episodes", 0),
+                total_frames=info.get("total_frames", 0),
+                fps=info.get("fps", 30),
+                codebase_version=info.get("codebase_version", "unknown"),
+                camera_keys=camera_keys,
+            ))
+
+            if max_sub_datasets and len(sub_datasets) >= max_sub_datasets:
+                print(f"  Reached max_sub_datasets limit: {max_sub_datasets}")
+                return sub_datasets
+
+    return sub_datasets
+
+
+def discover_sub_datasets_from_hub(
+    community_version: str,
+    cache_dir: Optional[str] = None,
+    max_sub_datasets: Optional[int] = None,
+) -> List[SubDatasetInfo]:
+    """
+    HuggingFace Hub에서 직접 community_dataset의 파일 목록을 가져와
+    sub-dataset 구조를 탐색합니다. (로컬 다운로드 없이 스트리밍)
+
+    Args:
+        community_version: "v1" 또는 "v2"
+        cache_dir: HF 캐시 디렉토리
+        max_sub_datasets: 최대 sub-dataset 수
+
+    Returns:
+        SubDatasetInfo 리스트 (local_root는 캐시 경로)
+    """
+    repo_id = f"HuggingFaceVLA/community_dataset_{community_version}"
+    print(f"  Fetching file list from Hub: {repo_id}")
+
+    try:
+        from huggingface_hub import HfApi, hf_hub_download
+        api = HfApi()
+
+        # 레포의 전체 파일 목록 가져오기
+        all_files = list(api.list_repo_files(repo_id=repo_id, repo_type="dataset"))
+
+        # meta/info.json 파일만 추출 → sub-dataset 목록 파악
+        info_files = [f for f in all_files if f.endswith("meta/info.json")]
+        print(f"  Found {len(info_files)} sub-datasets in {repo_id}")
+
+        sub_datasets = []
+
+        for info_file in info_files:
+            # 경로 파싱: contributor/dataset_name/meta/info.json
+            parts = Path(info_file).parts
+            if len(parts) < 4:
+                continue
+
+            contributor = parts[0]
+            dataset_name = parts[1]
+
+            # info.json 다운로드
+            try:
+                local_info_path = hf_hub_download(
+                    repo_id=repo_id,
+                    filename=info_file,
+                    repo_type="dataset",
+                    cache_dir=cache_dir,
+                )
+            except Exception as e:
+                print(f"    [WARNING] Cannot download {info_file}: {e}")
+                continue
+
+            # 다운로드된 경로에서 sub-dataset root 추정
+            local_meta_dir = Path(local_info_path).parent
+            local_root = str(local_meta_dir.parent)
+
+            try:
+                with open(local_info_path) as f:
+                    info = json.load(f)
+            except Exception as e:
+                print(f"    [WARNING] Cannot parse {local_info_path}: {e}")
+                continue
+
+            robot_type = info.get("robot_type", "unknown")
+            features = info.get("features", {})
+
+            action_info = features.get("action", {})
+            action_shape = action_info.get("shape", [6])
+            action_dim = action_shape[0] if isinstance(action_shape, list) else action_shape
+
+            state_info = features.get("observation.state", {})
+            state_shape = state_info.get("shape", [action_dim])
+            state_dim = state_shape[0] if isinstance(state_shape, list) else state_shape
+
+            camera_keys = [k for k in features if k.startswith("observation.images")]
+
+            sub_datasets.append(SubDatasetInfo(
+                contributor=contributor,
+                dataset_name=dataset_name,
+                community_version=community_version,
+                local_root=local_root,
+                robot_type=robot_type,
+                action_dim=int(action_dim),
+                state_dim=int(state_dim),
+                total_episodes=info.get("total_episodes", 0),
+                total_frames=info.get("total_frames", 0),
+                fps=info.get("fps", 30),
+                codebase_version=info.get("codebase_version", "unknown"),
+                camera_keys=camera_keys,
+            ))
+
+            if max_sub_datasets and len(sub_datasets) >= max_sub_datasets:
+                print(f"  Reached max_sub_datasets limit: {max_sub_datasets}")
+                break
+
+        return sub_datasets
+
     except Exception as e:
-        print(f"  [ERROR] Failed to load dataset {repo_id}: {e}")
-        print("  Falling back to dummy data.")
-        episodes = _generate_dummy_episodes(
-            num_episodes=max_episodes or 10,
-            action_dim=dataset_info.action_dim,
-            repo_id=repo_id,
-        )
-    
-    return {
-        "episodes": episodes,
-        "dataset_info": dataset_info,
-    }
+        print(f"  [ERROR] Hub discovery failed: {e}")
+        return []
 
 
-def _generate_dummy_episodes(
-    num_episodes: int,
-    action_dim: int = 6,
-    repo_id: str = "dummy",
+# ================================================================
+# 2. 개별 sub-dataset 로드
+# ================================================================
+
+def load_episodes_from_sub_dataset(
+    sub_ds: SubDatasetInfo,
+    max_episodes: Optional[int] = None,
+    global_episode_offset: int = 0,
 ) -> List[dict]:
-    """lerobot 미설치 시 테스트용 더미 에피소드 생성"""
-    print(f"  Generating {num_episodes} dummy episodes (action_dim={action_dim})...")
-    
-    tasks = [
-        "Pick up the red cube and place it in the box",
-        "Stack the blue block on the green block",
-        "Sort objects by color into bins",
-        "Grasp the yellow cylinder and move it right",
-        "Pick up the small sphere and drop it in the cup",
-    ]
-    
+    """
+    개별 sub-dataset(LeRobot 형식)에서 에피소드를 로드합니다.
+
+    Args:
+        sub_ds: SubDatasetInfo
+        max_episodes: 최대 로드 에피소드 수
+        global_episode_offset: 전역 에피소드 ID offset
+
+    Returns:
+        에피소드 딕셔너리 리스트
+    """
     episodes = []
-    for ep_idx in range(num_episodes):
-        num_frames = np.random.randint(200, 500)
-        actions = np.random.randn(num_frames, action_dim) * 0.1
-        
-        # 그리퍼 상태 시뮬레이션
-        gripper = np.zeros(num_frames)
-        t1 = num_frames // 3
-        t2 = 2 * num_frames // 3
-        gripper[t1:t2] = 1.0
-        actions[:, -1] = gripper
-        
+    local_root = Path(sub_ds.local_root)
+
+    # data/ 디렉토리의 parquet 파일 목록
+    data_dir = local_root / "data"
+    if not data_dir.exists():
+        print(f"    [WARNING] No data/ directory: {local_root}")
+        return []
+
+    # parquet 파일 수집 (chunk-xxx 하위 포함)
+    parquet_files = sorted(data_dir.rglob("*.parquet"))
+    if not parquet_files:
+        print(f"    [WARNING] No parquet files in: {data_dir}")
+        return []
+
+    try:
+        import pyarrow.parquet as pq
+        import pyarrow as pa
+    except ImportError:
+        print("    [WARNING] pyarrow not installed. pip install pyarrow")
+        return _fallback_dummy_episodes(sub_ds, max_episodes or 5, global_episode_offset)
+
+    # 에피소드별로 parquet 그룹화
+    # LeRobot v2: data/chunk-000/episode_000000.parquet
+    # LeRobot v2.1+: data/episode_000000.parquet
+    episode_files = {}
+    for pf in parquet_files:
+        name = pf.stem  # e.g., "episode_000000"
+        if name.startswith("episode_"):
+            ep_num = int(name.replace("episode_", ""))
+            episode_files[ep_num] = pf
+
+    if not episode_files:
+        print(f"    [WARNING] No episode_*.parquet files found in {data_dir}")
+        return []
+
+    ep_nums = sorted(episode_files.keys())
+    if max_episodes:
+        ep_nums = ep_nums[:max_episodes]
+
+    # videos/ 디렉토리 확인
+    videos_dir = local_root / "videos"
+
+    for ep_num in ep_nums:
+        pf = episode_files[ep_num]
+        try:
+            table = pq.read_table(pf)
+            df = table.to_pydict()
+
+            # action 추출
+            if "action" not in df:
+                continue
+
+            actions_raw = df["action"]
+            if len(actions_raw) == 0:
+                continue
+
+            # list of list → numpy
+            actions_np = np.array(actions_raw, dtype=np.float32)
+            if actions_np.ndim == 1:
+                actions_np = actions_np.reshape(-1, 1)
+
+            actual_action_dim = actions_np.shape[-1]
+
+            # state 추출
+            state_key = "observation.state"
+            if state_key in df and len(df[state_key]) > 0:
+                states_np = np.array(df[state_key], dtype=np.float32)
+                if states_np.ndim == 1:
+                    states_np = states_np.reshape(-1, 1)
+                actual_state_dim = states_np.shape[-1]
+            else:
+                states_np = np.zeros_like(actions_np)
+                actual_state_dim = actual_action_dim
+
+            # Task description 추출
+            task_desc = ""
+            for task_key in ["task", "language_instruction", "task_description"]:
+                if task_key in df and len(df[task_key]) > 0:
+                    val = df[task_key][0]
+                    if isinstance(val, (str, bytes)):
+                        task_desc = val.decode() if isinstance(val, bytes) else val
+                        break
+                    elif hasattr(val, '__str__'):
+                        task_desc = str(val)
+                        break
+
+            # Multi-Embodiment Zero-Padding
+            action_pad = MAX_ACTION_DIM - actual_action_dim
+            if action_pad > 0:
+                actions_padded = np.pad(
+                    actions_np, ((0, 0), (0, action_pad)),
+                    mode='constant', constant_values=0.0
+                )
+            elif action_pad < 0:
+                # action_dim이 MAX_ACTION_DIM보다 큰 경우 (rare)
+                actions_padded = actions_np[:, :MAX_ACTION_DIM]
+            else:
+                actions_padded = actions_np
+
+            state_pad = MAX_STATE_DIM - actual_state_dim
+            if state_pad > 0:
+                states_padded = np.pad(
+                    states_np, ((0, 0), (0, state_pad)),
+                    mode='constant', constant_values=0.0
+                )
+            elif state_pad < 0:
+                states_padded = states_np[:, :MAX_STATE_DIM]
+            else:
+                states_padded = states_np
+
+            # Action mask (실제 관절 = 1.0, 패딩 = 0.0)
+            action_mask = np.zeros(MAX_ACTION_DIM, dtype=np.float32)
+            action_mask[:min(actual_action_dim, MAX_ACTION_DIM)] = 1.0
+
+            # 비디오 디렉토리 경로 구성 (이미지 추출용)
+            dataset_root = str(local_root) if videos_dir.exists() else None
+
+            episodes.append({
+                "global_episode_id": global_episode_offset + ep_num,
+                "local_episode_id": ep_num,
+                "contributor": sub_ds.contributor,
+                "dataset_name": sub_ds.dataset_name,
+                "community_version": sub_ds.community_version,
+                "repo_id": f"{sub_ds.contributor}/{sub_ds.dataset_name}",
+                "robot_type": sub_ds.robot_type,
+                "task_description": task_desc,
+                "actions": actions_padded,        # [T, MAX_ACTION_DIM]
+                "states": states_padded,           # [T, MAX_STATE_DIM]
+                "action_mask": action_mask,        # [MAX_ACTION_DIM]
+                "actual_action_dim": actual_action_dim,
+                "actual_state_dim": actual_state_dim,
+                "num_frames": len(actions_np),
+                "fps": sub_ds.fps,
+                "dataset_root": dataset_root,
+                "camera_keys": sub_ds.camera_keys,
+            })
+
+        except Exception as e:
+            print(f"    [WARNING] Failed to load episode {ep_num} from {pf}: {e}")
+            continue
+
+    return episodes
+
+
+def _fallback_dummy_episodes(
+    sub_ds: SubDatasetInfo,
+    num_episodes: int,
+    global_offset: int,
+) -> List[dict]:
+    """pyarrow 미설치 시 테스트용 더미 에피소드"""
+    episodes = []
+    action_dim = sub_ds.action_dim
+
+    for i in range(num_episodes):
+        num_frames = np.random.randint(150, 400)
+        actions = np.random.randn(num_frames, action_dim).astype(np.float32) * 0.1
+
+        # gripper 시뮬레이션 (마지막 차원)
+        t1, t2 = num_frames // 3, 2 * num_frames // 3
+        actions[t1:t2, -1] = 1.0
+
+        # padding
+        pad = MAX_ACTION_DIM - action_dim
+        if pad > 0:
+            actions_padded = np.pad(actions, ((0, 0), (0, pad)))
+        else:
+            actions_padded = actions[:, :MAX_ACTION_DIM]
+
+        action_mask = np.zeros(MAX_ACTION_DIM, dtype=np.float32)
+        action_mask[:min(action_dim, MAX_ACTION_DIM)] = 1.0
+
         episodes.append({
-            "episode_id": ep_idx,
-            "actions": actions,
-            "states": actions.copy(),
-            "task_description": tasks[ep_idx % len(tasks)],
+            "global_episode_id": global_offset + i,
+            "local_episode_id": i,
+            "contributor": sub_ds.contributor,
+            "dataset_name": sub_ds.dataset_name,
+            "community_version": sub_ds.community_version,
+            "repo_id": f"{sub_ds.contributor}/{sub_ds.dataset_name}",
+            "robot_type": sub_ds.robot_type,
+            "task_description": f"Manipulation task by {sub_ds.contributor}",
+            "actions": actions_padded,
+            "states": actions_padded.copy(),
+            "action_mask": action_mask,
+            "actual_action_dim": action_dim,
+            "actual_state_dim": action_dim,
             "num_frames": num_frames,
-            "fps": 30,
+            "fps": sub_ds.fps,
             "dataset_root": None,
-            "repo_id": repo_id,
+            "camera_keys": sub_ds.camera_keys,
         })
-    
+
     return episodes
 
 
@@ -502,157 +551,203 @@ def _generate_dummy_episodes(
 # 3. 통합 파이프라인
 # ================================================================
 
-class SO101ConceptDatasetBuilder:
+class SmolVLACommunityDatasetBuilder:
     """
-    SO-101용 CBM-VLA Concept Dataset Builder
-    
-    전체 파이프라인을 순차 실행합니다:
-    1. 데이터셋 검색 & 로드
-    2. Auto Segmentation
-    3. LLM Annotation (Gemini)
-    4. T5 Concept Refinement
-    5. 최종 저장
-    
+    SmolVLA 학습에 사용된 정확히 동일한 데이터셋으로
+    CBM-VLA Concept Dataset를 구축하는 통합 빌더.
+
+    학습 데이터:
+        - HuggingFaceVLA/community_dataset_v1 (128 datasets, 11.1K episodes)
+        - HuggingFaceVLA/community_dataset_v2 (340 datasets, 6.3K  episodes)
+        - 총 468 datasets, ~17,400 episodes, ~10M frames
+
     Args:
         output_dir: 출력 디렉토리
-        gemini_api_key: Gemini API 키 (없으면 fallback annotation 사용)
+        gemini_api_key: Gemini API 키 (또는 OPENROUTER_API_KEY 환경변수)
         max_concepts: 최대 concept pool 크기
         similarity_threshold: T5 클러스터링 유사도 임계값
         min_segment_frames: 최소 세그먼트 길이 (프레임)
-        gemini_model: Gemini 모델명
+        gemini_model: 모델명 (기본: google/gemini-2.0-flash)
     """
-    
+
     def __init__(
         self,
-        output_dir: str = "./data/so101_concept_dataset",
+        output_dir: str = "./data/smolvla_concept_dataset",
         gemini_api_key: Optional[str] = None,
         max_concepts: int = 50,
         similarity_threshold: float = 0.85,
         min_segment_frames: int = 15,
-        gemini_model: str = "gemini-2.0-flash",
+        gemini_model: str = "google/gemini-2.0-flash",
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Sub-modules 초기화
-        self.segmenter = AutoSegmenter(
-            min_segment_frames=min_segment_frames,
-        )
-        
+
+        self.segmenter = AutoSegmenter(min_segment_frames=min_segment_frames)
+
         self.annotator = GeminiConceptAnnotator(
-            api_key=gemini_api_key,
+            api_key=gemini_api_key or os.environ.get("OPENROUTER_API_KEY"),
             model_name=gemini_model,
         )
-        
+
         self.refiner = ConceptRefiner(
             similarity_threshold=similarity_threshold,
             max_concepts=max_concepts,
             min_frequency=3,
         )
-        
-        # 중간 결과 캐시 경로
+
         self.cache_dir = self.output_dir / "cache"
         self.cache_dir.mkdir(exist_ok=True)
-    
+
+    # ----------------------------------------------------------
     def build(
         self,
-        repo_ids: Optional[List[str]] = None,
-        max_episodes_per_repo: Optional[int] = None,
-        search_hub: bool = False,
+        # 로컬 데이터셋 경로 (다운로드된 경우)
+        v1_local_dir: Optional[str] = None,
+        v2_local_dir: Optional[str] = None,
+        # Hub에서 직접 탐색 (로컬 없을 때)
+        use_hub: bool = True,
+        hf_cache_dir: Optional[str] = None,
+        # 제한 옵션
+        max_sub_datasets: Optional[int] = None,
+        max_episodes_per_sub_dataset: Optional[int] = None,
+        # 기타
         skip_annotation: bool = False,
-        cache_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         전체 파이프라인 실행
-        
+
         Args:
-            repo_ids: 사용할 데이터셋 repo ID 리스트
-            max_episodes_per_repo: repo당 최대 에피소드 수
-            search_hub: HF Hub에서 추가 SO 데이터셋 검색 여부
-            skip_annotation: True면 LLM annotation 건너뜀 (fallback 사용)
-            cache_dir: 데이터셋 캐시 디렉토리
-            
+            v1_local_dir: community_dataset_v1 로컬 경로
+                          (예: "/data/community_dataset_v1")
+            v2_local_dir: community_dataset_v2 로컬 경로
+                          (예: "/data/community_dataset_v2")
+            use_hub: True면 로컬 없을 때 HF Hub에서 직접 탐색
+            hf_cache_dir: HF 캐시 디렉토리
+            max_sub_datasets: 각 버전당 최대 sub-dataset 수
+                               (None = 전체 / v1: 128, v2: 340)
+            max_episodes_per_sub_dataset: sub-dataset당 최대 에피소드 수
+                                          (None = 전체)
+            skip_annotation: True면 LLM annotation 스킵 (fallback 사용)
+
         Returns:
             최종 concept 데이터셋 dict
         """
         print("=" * 70)
-        print("CBM-VLA SO-101 Concept Dataset Builder")
+        print("CBM-VLA Community Dataset Builder")
+        print("(SmolVLA Pretraining Dataset: v1 + v2)")
         print("=" * 70)
-        
+
         # ============================================================
-        # Step 1: 데이터셋 검색 & 호환성 확인
+        # Step 1: Sub-dataset 목록 수집
         # ============================================================
-        print("\n[Step 1] Discovering SO-100/SO-101 compatible datasets...")
-        
-        compatible_datasets = discover_so_datasets(
-            repo_ids=repo_ids,
-            search_hub=search_hub,
-        )
-        
-        if not compatible_datasets:
-            print("  No compatible datasets found!")
-            print("  Creating dummy dataset for testing...")
-            compatible_datasets = [DatasetInfo(
-                repo_id="dummy/so101_test",
-                robot_type="so101_follower",
-                action_dim=6,
-                state_dim=6,
-                total_episodes=20,
-                total_frames=6000,
-                fps=30,
-                codebase_version="v2.1",
-            )]
-        
-        print(f"\n  Found {len(compatible_datasets)} compatible datasets:")
-        for ds in compatible_datasets:
-            print(f"    - {ds.repo_id}: {ds.total_episodes} episodes, "
-                  f"{ds.total_frames} frames, {ds.robot_type}")
-        
+        print("\n[Step 1] Discovering sub-datasets...")
+        print(f"  Sources: HuggingFaceVLA/community_dataset_v1 + v2")
+
+        all_sub_datasets: List[SubDatasetInfo] = []
+
+        for version, local_dir in [("v1", v1_local_dir), ("v2", v2_local_dir)]:
+            repo_id = f"HuggingFaceVLA/community_dataset_{version}"
+            expected = 128 if version == "v1" else 340
+
+            if local_dir and Path(local_dir).exists():
+                # 로컬 탐색 (빠름)
+                print(f"\n  [{version}] Scanning local: {local_dir}")
+                sub_ds_list = discover_sub_datasets_from_local(
+                    local_dir=local_dir,
+                    community_version=version,
+                    max_sub_datasets=max_sub_datasets,
+                )
+            elif use_hub:
+                # Hub 탐색 (느리지만 다운로드 불필요)
+                print(f"\n  [{version}] Scanning Hub: {repo_id}")
+                sub_ds_list = discover_sub_datasets_from_hub(
+                    community_version=version,
+                    cache_dir=hf_cache_dir,
+                    max_sub_datasets=max_sub_datasets,
+                )
+            else:
+                print(f"\n  [{version}] Skipping (no local dir, use_hub=False)")
+                continue
+
+            found = len(sub_ds_list)
+            print(f"  [{version}] Found {found}/{expected} sub-datasets")
+            all_sub_datasets.extend(sub_ds_list)
+
+        if not all_sub_datasets:
+            print("\n  [WARNING] No sub-datasets found. Generating dummy data...")
+            all_sub_datasets = self._generate_dummy_sub_datasets(10)
+
+        # 통계 출력
+        total_eps_meta = sum(ds.total_episodes for ds in all_sub_datasets)
+        robot_types = set(ds.robot_type for ds in all_sub_datasets)
+        print(f"\n  Total sub-datasets: {len(all_sub_datasets)}")
+        print(f"  Expected episodes (from meta): {total_eps_meta:,}")
+        print(f"  Robot types: {', '.join(sorted(robot_types))}")
+
+        # sub-dataset 목록 저장 (재현성)
+        sub_ds_list_path = self.cache_dir / "sub_dataset_list.json"
+        with open(sub_ds_list_path, 'w') as f:
+            json.dump([asdict(ds) for ds in all_sub_datasets], f, indent=2)
+        print(f"  Saved sub-dataset list → {sub_ds_list_path}")
+
         # ============================================================
         # Step 2: 에피소드 로드
         # ============================================================
-        print("\n[Step 2] Loading episodes...")
-        
+        print("\n[Step 2] Loading episodes from all sub-datasets...")
+
         all_episodes = []
-        source_repos = []
-        
-        for ds_info in compatible_datasets:
-            result = load_episodes_from_repo(
-                repo_id=ds_info.repo_id,
-                dataset_info=ds_info,
-                max_episodes=max_episodes_per_repo,
-                cache_dir=cache_dir,
-            )
-            
-            episodes = result["episodes"]
-            if episodes:
-                # 에피소드 ID를 전역적으로 고유하게 재부여
-                offset = len(all_episodes)
-                for ep in episodes:
-                    ep["global_episode_id"] = offset + ep["episode_id"]
-                
-                all_episodes.extend(episodes)
-                source_repos.append(ds_info.repo_id)
-        
-        total_frames = sum(ep["num_frames"] for ep in all_episodes)
-        print(f"\n  Total loaded: {len(all_episodes)} episodes, {total_frames} frames")
-        
+        load_stats = {"success": 0, "failed": 0, "total_frames": 0}
+
+        for i, sub_ds in enumerate(all_sub_datasets):
+            if i % 20 == 0:
+                print(f"  Processing sub-dataset {i+1}/{len(all_sub_datasets)}: "
+                      f"{sub_ds.contributor}/{sub_ds.dataset_name} "
+                      f"(robot={sub_ds.robot_type}, action_dim={sub_ds.action_dim})")
+
+            try:
+                eps = load_episodes_from_sub_dataset(
+                    sub_ds=sub_ds,
+                    max_episodes=max_episodes_per_sub_dataset,
+                    global_episode_offset=len(all_episodes),
+                )
+
+                if eps:
+                    all_episodes.extend(eps)
+                    load_stats["success"] += 1
+                    load_stats["total_frames"] += sum(e["num_frames"] for e in eps)
+                else:
+                    load_stats["failed"] += 1
+
+            except Exception as e:
+                print(f"    [ERROR] {sub_ds.contributor}/{sub_ds.dataset_name}: {e}")
+                load_stats["failed"] += 1
+                continue
+
+        print(f"\n  Loaded: {len(all_episodes):,} episodes, "
+              f"{load_stats['total_frames']:,} frames")
+        print(f"  Sub-datasets: {load_stats['success']} OK, "
+              f"{load_stats['failed']} failed")
+
+        if not all_episodes:
+            raise RuntimeError("No episodes loaded. Check dataset paths.")
+
         # ============================================================
         # Step 3: Auto Segmentation
         # ============================================================
         print("\n[Step 3] Running Auto Segmentation...")
-        
-        # 캐시 확인
+
         seg_cache_path = self.cache_dir / "segmentation_results.json"
-        
+
         if seg_cache_path.exists():
             print(f"  Loading cached segmentation from {seg_cache_path}")
             with open(seg_cache_path) as f:
                 all_segmentations = json.load(f)
         else:
             all_segmentations = []
-            
-            for ep in all_episodes:
+            for idx, ep in enumerate(all_episodes):
+                if idx % 1000 == 0:
+                    print(f"  Segmenting episode {idx}/{len(all_episodes)}...")
+
                 seg_result = self.segmenter.segment_episode(
                     actions=ep["actions"],
                     episode_id=ep["global_episode_id"],
@@ -660,208 +755,257 @@ class SO101ConceptDatasetBuilder:
                     dataset_name=ep["repo_id"],
                     fps=ep["fps"],
                 )
-                all_segmentations.append(asdict(seg_result))
-            
-            # 캐시 저장
+                # robot_type 정보 추가 (annotation에서 활용)
+                seg_dict = asdict(seg_result)
+                seg_dict["robot_type"] = ep["robot_type"]
+                seg_dict["contributor"] = ep["contributor"]
+                all_segmentations.append(seg_dict)
+
             with open(seg_cache_path, 'w') as f:
                 json.dump(all_segmentations, f, indent=2, ensure_ascii=False)
-            print(f"  Cached segmentation to {seg_cache_path}")
-        
+            print(f"  Cached segmentation → {seg_cache_path}")
+
         total_segments = sum(len(s["segments"]) for s in all_segmentations)
-        avg_segments = total_segments / max(len(all_segmentations), 1)
-        print(f"  Total segments: {total_segments} "
-              f"(avg {avg_segments:.1f} per episode)")
-        
+        avg_per_ep = total_segments / max(len(all_segmentations), 1)
+        print(f"  Total segments: {total_segments:,} "
+              f"(avg {avg_per_ep:.1f}/episode)")
+
         # ============================================================
-        # Step 4: LLM Annotation (Gemini)
+        # Step 4: LLM Annotation (Gemini via OpenRouter)
         # ============================================================
         print("\n[Step 4] Running LLM Concept Annotation...")
-        
+
         ann_cache_path = self.cache_dir / "raw_annotations.json"
-        
+
         if ann_cache_path.exists():
             print(f"  Loading cached annotations from {ann_cache_path}")
             with open(ann_cache_path) as f:
                 all_annotations = json.load(f)
         else:
-            if skip_annotation:
-                print("  Skipping LLM annotation (using fallback)...")
-            
+            # dataset_root 매핑 (episode_id → dataset_root)
+            ep_root_map = {ep["global_episode_id"]: ep["dataset_root"]
+                          for ep in all_episodes}
+            # 첫 번째 유효한 dataset_root 사용 (annotator에 전달)
+            first_valid_root = next(
+                (ep["dataset_root"] for ep in all_episodes if ep["dataset_root"]),
+                None
+            )
+
             all_annotations = self.annotator.annotate_segments(
                 segments=all_segmentations,
-                dataset_root=all_episodes[0].get("dataset_root") if all_episodes else None,
+                dataset_root=first_valid_root,
                 output_path=str(ann_cache_path),
             )
-            
-            # 캐시 저장
+
             with open(ann_cache_path, 'w') as f:
                 json.dump(all_annotations, f, indent=2, ensure_ascii=False)
-            print(f"  Cached annotations to {ann_cache_path}")
-        
-        print(f"  Total annotations: {len(all_annotations)}")
-        
+            print(f"  Cached annotations → {ann_cache_path}")
+
+        print(f"  Total annotations: {len(all_annotations):,}")
+
         # ============================================================
         # Step 5: T5 Concept Refinement
         # ============================================================
         print("\n[Step 5] Running T5 Concept Refinement...")
-        
+
         concept_pool, final_dataset = self.refiner.refine_and_build(
             raw_concepts=all_annotations,
             segments=all_segmentations,
         )
-        
-        print(f"  Concept pool size: {len(concept_pool)}")
-        print(f"  Final dataset entries: {len(final_dataset)}")
-        
+
+        print(f"  Concept pool: {len(concept_pool)} concepts")
+        print(f"  Final dataset: {len(final_dataset):,} entries")
+
         if concept_pool:
-            print("\n  Top 10 concepts:")
-            for c in concept_pool[:10]:
+            print("\n  Top 15 concepts:")
+            for c in concept_pool[:15]:
                 print(f"    [{c['concept_id']:2d}] {c['name']:25s} "
-                      f"| freq={c['frequency']:4d} ({c['frequency_pct']:5.1f}%)")
-        
+                      f"| freq={c['frequency']:5d} ({c['frequency_pct']:5.1f}%)"
+                      f" | cluster_size={c['cluster_size']}")
+
         # ============================================================
-        # Step 6: 에피소드 원본 데이터와 concept 매핑 병합
+        # Step 6: Concept ↔ Episode 매핑
         # ============================================================
         print("\n[Step 6] Merging concept labels with episode data...")
-        
-        # episode_id → concept entries 인덱스
+
         ep_concept_map = defaultdict(list)
         for entry in final_dataset:
             ep_concept_map[entry["episode_id"]].append(entry)
-        
-        # 최종 학습용 데이터 구조 구성
+
         training_entries = []
-        
         for ep in all_episodes:
             ep_id = ep["global_episode_id"]
             concepts = ep_concept_map.get(ep_id, [])
-            
             if not concepts:
                 continue
-            
-            # 에피소드 내 concept 순서 정렬
+
             concepts.sort(key=lambda x: x["segment_id"])
-            
-            # 활성 concept ID 리스트 (binary vector 생성용)
             active_concept_ids = list(set(c["concept_id"] for c in concepts))
-            
-            # concept 순서 (order_in_episode 기반)
             concept_order = [c["concept_id"] for c in concepts]
-            
+
             training_entries.append({
                 "episode_id": ep_id,
                 "repo_id": ep["repo_id"],
+                "contributor": ep["contributor"],
+                "community_version": ep["community_version"],
+                "robot_type": ep["robot_type"],
+                "actual_action_dim": ep["actual_action_dim"],
+                "action_mask": ep["action_mask"].tolist(),
                 "task_description": ep["task_description"],
                 "num_frames": ep["num_frames"],
                 "fps": ep["fps"],
-                "action_dim": ep["actions"].shape[-1],
-                # Concept 정보
                 "active_concept_ids": active_concept_ids,
                 "concept_order": concept_order,
                 "segments": concepts,
-                # 각 세그먼트의 프레임 범위 (학습 시 해당 프레임에 concept label 부여)
                 "frame_to_concept": self._build_frame_concept_map(
                     concepts, ep["num_frames"], len(concept_pool)
                 ),
             })
-        
-        print(f"  Training entries: {len(training_entries)}")
-        
+
+        print(f"  Training entries: {len(training_entries):,}")
+
         # ============================================================
         # Step 7: 최종 저장
         # ============================================================
         print("\n[Step 7] Saving final dataset...")
-        
-        output = {
-            "concept_pool": concept_pool,
-            "training_entries": training_entries,
-            "dataset_info": {
-                "source_repos": source_repos,
-                "total_episodes": len(all_episodes),
-                "total_frames": total_frames,
-                "total_training_entries": len(training_entries),
-                "robot_type": "so101",
-                "action_dim": SO101_ACTION_DIM,
-                "state_dim": SO101_STATE_DIM,
-                "num_concepts": len(concept_pool),
-                "joint_names": SO101_JOINT_NAMES,
-                "pipeline_version": "1.0",
-                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            },
+
+        # Robot type 통계
+        robot_stats = defaultdict(int)
+        action_dim_stats = defaultdict(int)
+        for ep in all_episodes:
+            robot_stats[ep["robot_type"]] += 1
+            action_dim_stats[ep["actual_action_dim"]] += 1
+
+        dataset_info = {
+            "source_repos": SMOLVLA_COMMUNITY_REPOS,
+            "total_sub_datasets": len(all_sub_datasets),
+            "total_episodes": len(all_episodes),
+            "total_frames": load_stats["total_frames"],
+            "total_training_entries": len(training_entries),
+            "total_segments": total_segments,
+            "num_concepts": len(concept_pool),
+            "max_action_dim": MAX_ACTION_DIM,
+            "max_state_dim": MAX_STATE_DIM,
+            "robot_type_distribution": dict(robot_stats),
+            "action_dim_distribution": {str(k): v for k, v in action_dim_stats.items()},
+            "pipeline_version": "2.0",
+            "smolvla_compatible": True,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
-        
-        # concept_pool 저장
+
+        # concept_pool.json
         pool_path = self.output_dir / "concept_pool.json"
         with open(pool_path, 'w') as f:
             json.dump(concept_pool, f, indent=2, ensure_ascii=False)
         print(f"  Saved concept pool → {pool_path}")
-        
-        # training_entries 저장 (frame_to_concept은 별도 npy로)
-        entries_for_json = []
-        for entry in training_entries:
-            e = {k: v for k, v in entry.items() if k != "frame_to_concept"}
-            entries_for_json.append(e)
-        
+
+        # training_entries.json (frame_to_concept 제외)
+        entries_for_json = [
+            {k: v for k, v in e.items() if k != "frame_to_concept"}
+            for e in training_entries
+        ]
         entries_path = self.output_dir / "training_entries.json"
         with open(entries_path, 'w') as f:
             json.dump(entries_for_json, f, indent=2, ensure_ascii=False)
         print(f"  Saved training entries → {entries_path}")
-        
-        # frame-level concept labels 저장 (numpy)
+
+        # frame-level labels (numpy)
         labels_dir = self.output_dir / "frame_labels"
         labels_dir.mkdir(exist_ok=True)
-        
         for entry in training_entries:
             ep_id = entry["episode_id"]
             label_path = labels_dir / f"episode_{ep_id:06d}_concepts.npy"
             np.save(label_path, entry["frame_to_concept"])
         print(f"  Saved frame labels → {labels_dir}/")
-        
-        # dataset_info 저장
+
+        # dataset_info.json
         info_path = self.output_dir / "dataset_info.json"
         with open(info_path, 'w') as f:
-            json.dump(output["dataset_info"], f, indent=2, ensure_ascii=False)
+            json.dump(dataset_info, f, indent=2, ensure_ascii=False)
         print(f"  Saved dataset info → {info_path}")
-        
+
         print("\n" + "=" * 70)
-        print("✓ Dataset build complete!")
-        print(f"  Output directory: {self.output_dir}")
-        print(f"  Concept pool: {len(concept_pool)} concepts")
-        print(f"  Training entries: {len(training_entries)} episodes")
-        print(f"  Action dim: {SO101_ACTION_DIM} (SO-101: 5 joints + 1 gripper)")
+        print("✓ SmolVLA Community Dataset Build Complete!")
+        print(f"  Sources: community_dataset_v1 + v2")
+        print(f"  Sub-datasets: {len(all_sub_datasets)}")
+        print(f"  Episodes: {len(all_episodes):,}")
+        print(f"  Segments: {total_segments:,}")
+        print(f"  Concepts: {len(concept_pool)}")
+        print(f"  Training entries: {len(training_entries):,}")
+        print(f"  Output: {self.output_dir}")
         print("=" * 70)
-        
-        return output
-    
+
+        return {
+            "concept_pool": concept_pool,
+            "training_entries": training_entries,
+            "dataset_info": dataset_info,
+        }
+
+    # ----------------------------------------------------------
     def _build_frame_concept_map(
         self,
         concepts: List[dict],
         num_frames: int,
         num_concepts: int,
     ) -> np.ndarray:
-        """
-        프레임별 활성 concept binary vector를 생성합니다.
-        
-        Args:
-            concepts: 에피소드 내 concept 리스트 (segment별)
-            num_frames: 에피소드 총 프레임 수
-            num_concepts: concept pool 크기
-            
-        Returns:
-            [num_frames, num_concepts] binary array
-                각 프레임에서 활성인 concept = 1.0, 비활성 = 0.0
-        """
+        """프레임별 활성 concept binary vector [num_frames, num_concepts]"""
         labels = np.zeros((num_frames, num_concepts), dtype=np.float32)
-        
-        for concept_entry in concepts:
-            concept_id = concept_entry.get("concept_id", 0)
-            start = concept_entry.get("start_frame", 0)
-            end = min(concept_entry.get("end_frame", num_frames), num_frames)
-            
-            if 0 <= concept_id < num_concepts and start < end:
-                labels[start:end, concept_id] = 1.0
-        
+        for c in concepts:
+            cid = c.get("concept_id", 0)
+            start = c.get("start_frame", 0)
+            end = min(c.get("end_frame", num_frames), num_frames)
+            if 0 <= cid < num_concepts and start < end:
+                labels[start:end, cid] = 1.0
         return labels
+
+    # ----------------------------------------------------------
+    def _generate_dummy_sub_datasets(self, n: int) -> List[SubDatasetInfo]:
+        """테스트용 더미 sub-dataset 목록"""
+        dummy = []
+        for i in range(n):
+            dummy.append(SubDatasetInfo(
+                contributor=f"contributor_{i:03d}",
+                dataset_name=f"pick_place_{i:03d}",
+                community_version="v1",
+                local_root=f"/tmp/dummy_{i}",
+                robot_type="so101" if i % 2 == 0 else "koch",
+                action_dim=6,
+                state_dim=6,
+                total_episodes=20,
+                total_frames=6000,
+                fps=30,
+                codebase_version="v2.1",
+            ))
+        return dummy
+
+
+# ================================================================
+# 비용 추정 유틸리티
+# ================================================================
+
+def estimate_annotation_cost(
+    total_episodes: int = 17400,
+    avg_segments_per_episode: float = 4.5,
+    model: str = "gemini-2.0-flash",
+) -> None:
+    """SmolVLA 전체 데이터셋 annotation 비용 추정 출력"""
+    from .llm_annotation import GeminiConceptAnnotator
+    annotator = GeminiConceptAnnotator()
+
+    total_segments = int(total_episodes * avg_segments_per_episode)
+    cost = annotator.estimate_cost(total_segments, model)
+
+    print("\n=== SmolVLA Full Dataset Annotation Cost Estimate ===")
+    print(f"  Dataset: community_dataset_v1 + v2")
+    print(f"  Episodes: {total_episodes:,}")
+    print(f"  Avg segments/episode: {avg_segments_per_episode}")
+    print(f"  Total segments: {total_segments:,}")
+    print(f"  Model: {model}")
+    print(f"  Input tokens: {cost['total_input_tokens']:,} → ${cost['input_cost_usd']:.2f}")
+    print(f"  Output tokens: {cost['total_output_tokens']:,} → ${cost['output_cost_usd']:.2f}")
+    print(f"  Total cost: ${cost['total_cost_usd']:.2f} USD (≈ ₩{cost['total_cost_usd']*1400:.0f})")
+    print(f"  Batch 50% discount: ${cost['batch_discount_50pct']:.2f} USD")
+    print("=" * 52)
 
 
 # ================================================================
@@ -870,29 +1014,38 @@ class SO101ConceptDatasetBuilder:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build CBM-VLA concept dataset from SO-101 LeRobot data"
-    )
-    
-    parser.add_argument(
-        "--repo_ids", nargs="+", default=None,
-        help="HuggingFace dataset repo IDs to use. "
-             "If not specified, uses known SO-100/SO-101 repos."
+        description="Build CBM-VLA concept dataset from SmolVLA community datasets"
     )
     parser.add_argument(
-        "--output_dir", type=str, default="./data/so101_concept_dataset",
-        help="Output directory for the concept dataset"
+        "--v1_local_dir", type=str, default=None,
+        help="Local path to HuggingFaceVLA/community_dataset_v1 "
+             "(e.g. /data/community_dataset_v1). "
+             "Download: hf download HuggingFaceVLA/community_dataset_v1 "
+             "--repo-type=dataset --local-dir /data/community_dataset_v1"
     )
     parser.add_argument(
-        "--max_episodes_per_repo", type=int, default=None,
-        help="Max episodes to load per repo"
+        "--v2_local_dir", type=str, default=None,
+        help="Local path to HuggingFaceVLA/community_dataset_v2"
+    )
+    parser.add_argument(
+        "--output_dir", type=str, default="./data/smolvla_concept_dataset",
+        help="Output directory"
     )
     parser.add_argument(
         "--gemini_api_key", type=str, default=None,
-        help="Gemini API key (or set GEMINI_API_KEY env var)"
+        help="OpenRouter API key (or set OPENROUTER_API_KEY env var)"
     )
     parser.add_argument(
-        "--gemini_model", type=str, default="gemini-2.0-flash",
-        help="Gemini model to use for annotation"
+        "--gemini_model", type=str, default="google/gemini-2.0-flash",
+        help="Model to use via OpenRouter (e.g. google/gemini-2.0-flash)"
+    )
+    parser.add_argument(
+        "--max_sub_datasets", type=int, default=None,
+        help="Max sub-datasets per community version (None = all)"
+    )
+    parser.add_argument(
+        "--max_episodes_per_sub_dataset", type=int, default=None,
+        help="Max episodes per sub-dataset (None = all)"
     )
     parser.add_argument(
         "--max_concepts", type=int, default=50,
@@ -903,37 +1056,45 @@ def main():
         help="T5 clustering similarity threshold"
     )
     parser.add_argument(
-        "--search_hub", action="store_true",
-        help="Search HuggingFace Hub for additional SO datasets"
+        "--use_hub", action="store_true", default=True,
+        help="Use HF Hub when local dir not available"
+    )
+    parser.add_argument(
+        "--hf_cache_dir", type=str, default=None,
+        help="HuggingFace cache directory"
     )
     parser.add_argument(
         "--skip_annotation", action="store_true",
         help="Skip LLM annotation (use rule-based fallback)"
     )
     parser.add_argument(
-        "--cache_dir", type=str, default=None,
-        help="Local cache directory for datasets"
+        "--estimate_cost_only", action="store_true",
+        help="Only print cost estimate and exit"
     )
-    
+
     args = parser.parse_args()
-    
-    builder = SO101ConceptDatasetBuilder(
+
+    if args.estimate_cost_only:
+        estimate_annotation_cost()
+        return
+
+    builder = SmolVLACommunityDatasetBuilder(
         output_dir=args.output_dir,
-        gemini_api_key=args.gemini_api_key or os.environ.get("GEMINI_API_KEY"),
+        gemini_api_key=args.gemini_api_key or os.environ.get("OPENROUTER_API_KEY"),
         max_concepts=args.max_concepts,
         similarity_threshold=args.similarity_threshold,
         gemini_model=args.gemini_model,
     )
-    
-    result = builder.build(
-        repo_ids=args.repo_ids,
-        max_episodes_per_repo=args.max_episodes_per_repo,
-        search_hub=args.search_hub,
+
+    builder.build(
+        v1_local_dir=args.v1_local_dir,
+        v2_local_dir=args.v2_local_dir,
+        use_hub=args.use_hub,
+        hf_cache_dir=args.hf_cache_dir,
+        max_sub_datasets=args.max_sub_datasets,
+        max_episodes_per_sub_dataset=args.max_episodes_per_sub_dataset,
         skip_annotation=args.skip_annotation,
-        cache_dir=args.cache_dir,
     )
-    
-    return result
 
 
 if __name__ == "__main__":
