@@ -1,542 +1,585 @@
 """
-Stage 3: T5 Concept Refinement & Pool Construction
-====================================================
+Stage 3: T5 Concept Refinement — LaBo/CLG-CBM Style
+=====================================================
 
-Gemini가 생성한 수만 개의 raw concept 문장을 정제하여
-20~50개의 표준화된 concept pool을 구축합니다.
+Gemini가 생성한 phrase 리스트에서 concept pool을 구축합니다.
 
-=== LaBo/CLG-CBM과의 관계 ===
+=== Action Concept Pool ===
+입력: ordered list of atomic motion phrases
+  seg0: ["arm extends forward toward target",
+         "gripper opens wide in preparation"]
+  seg1: ["arm descends and aligns above target",
+         "fingers close around object to secure grip"]
+  ...
 
-LaBo는 GPT-3가 생성한 후보 컨셉에서 submodular optimization으로
-discriminability와 diversity를 최대화하는 컨셉 부분집합을 선택합니다.
+T5가 의미적으로 유사한 phrase를 클러스터링:
+  "arm extends forward toward target"    ─┐
+  "arm moves forward approaching object" ─┘→ approach_target
+  "gripper opens wide"                   ─┐
+  "gripper opens in preparation"         ─┘→ gripper_open_prepare
+  "fingers close around object"          ─┐
+  "gripper closes to grasp"              ─┘→ grasp_object
 
-CBM-VLA에서는 LaBo의 "정신"(자동 컨셉 선택)을 따르되, 방법은 다릅니다:
-  
-  1. Embedding 기반 클러스터링 (LaBo의 submodular selection 대체)
-    - T5 encoder로 모든 raw concept 문장을 임베딩
-    - Cosine similarity 기반 클러스터링
-    - 클러스터 중심에 가장 가까운 문장을 대표 컨셉으로 선택
-    
-  2. 빈도 기반 필터링 (LaBo에는 없는 추가 단계)
-    - 너무 드문 컨셉(<5회 출현)은 노이즈로 간주하여 제거
-    - 너무 흔한 컨셉(>80% 에피소드)은 정보량이 적어 제거 후보
-    
-  3. 수동 검증 옵션 (LaBo의 human evaluation과 유사)
-    - 최종 컨셉 풀을 출력하여 연구자가 검토 가능
-    - 의미적으로 부적절한 컨셉을 수동으로 교체/제거
+=== Scene Concept Pool ===
+입력: list of visual attribute phrases
+  ["green colored object",
+   "cylindrical shaped object",
+   "object at center of workspace"]
 
-로봇 도메인에서 submodular optimization이 불필요한 이유:
-  - LaBo의 대상: ImageNet (1000 클래스, 수천 개 후보 컨셉)
-  - CBM-VLA의 대상: tabletop manipulation (고유 행동 ~20~50개)
-  - 컨셉 수가 적으므로 클러스터링 + 빈도 필터링으로 충분
+T5가 클러스터링:
+  "green colored object"   ─┐
+  "green object"           ─┘→ green_colored
+  "cylindrical shaped"     ─┐
+  "cylinder-like object"   ─┘→ cylindrical_shape
+  "object at center"       ─┐
+  "centered in frame"      ─┘→ center_position
 """
 
 import json
 import numpy as np
 from collections import Counter, defaultdict
 from typing import Dict, List, Optional, Tuple
-from pathlib import Path
 
 
 class ConceptRefiner:
     """
-    T5 기반 컨셉 정제 및 풀 구축
-    
-    Pipeline:
-    1. T5 encoder로 모든 raw concept description을 임베딩
-    2. Cosine similarity 기반 Agglomerative Clustering
-    3. 클러스터별 대표 컨셉 선택 (centroid에 가장 가까운 것)
-    4. 빈도 필터링 (너무 드물거나 너무 흔한 컨셉 제거)
-    5. 최종 concept pool 구축
-    
-    Args:
-        model_name: T5 모델 이름 (문장 임베딩용)
-        similarity_threshold: 클러스터링 병합 임계값 (cosine sim)
-        max_concepts: 최대 컨셉 수
-        min_frequency: 최소 출현 빈도 (이하면 제거)
+    LaBo/CLG-CBM 스타일 concept pool 구축.
+
+    Action: T5(phrase) 클러스터링 — ordered motion phrases
+    Scene:  T5(phrase) 클러스터링 — visual attribute phrases
     """
-    
+
     def __init__(
         self,
         model_name: str = "google/flan-t5-base",
         similarity_threshold: float = 0.85,
         max_concepts: int = 50,
-        min_frequency: int = 5,
+        max_action_concepts: int = 50,
+        max_scene_concepts: int = 50,
+        min_frequency: int = 2,
     ):
-        self.model_name = model_name
+        self.model_name           = model_name
         self.similarity_threshold = similarity_threshold
-        self.max_concepts = max_concepts
-        self.min_frequency = min_frequency
-        
-        self._encoder = None
+        self.max_action_concepts  = max_action_concepts or max_concepts
+        self.max_scene_concepts   = max_scene_concepts  or max_concepts
+        self.min_frequency        = min_frequency
+        self._encoder   = None
         self._tokenizer = None
-    
+
+    # ── T5 / TF-IDF 인코더 ────────────────────────────────────────
+
     def _init_encoder(self):
-        """T5 인코더 초기화"""
         if self._encoder is not None:
             return
-        
         try:
             from transformers import T5EncoderModel, T5Tokenizer
             import torch
-            
             print(f"  Loading T5 encoder: {self.model_name}")
             self._tokenizer = T5Tokenizer.from_pretrained(self.model_name)
-            self._encoder = T5EncoderModel.from_pretrained(self.model_name)
+            self._encoder   = T5EncoderModel.from_pretrained(self.model_name)
             self._encoder.eval()
-            
-            if torch.cuda.is_available():
-                self._encoder = self._encoder.cuda()
-                self._device = "cuda"
-            else:
-                self._device = "cpu"
-            
+            self._device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._encoder = self._encoder.to(self._device)
             print(f"  T5 encoder loaded on {self._device}")
-            
         except ImportError:
-            print("  [WARNING] transformers not available. Using simple text similarity.")
+            print("  [WARNING] transformers not available. Using TF-IDF.")
             self._encoder = None
-    
+
     def _encode_texts(self, texts: List[str], batch_size: int = 64) -> np.ndarray:
-        """
-        T5 encoder로 텍스트 리스트를 임베딩
-        
-        Args:
-            texts: 임베딩할 텍스트 리스트
-            batch_size: 배치 크기
-            
-        Returns:
-            embeddings: [num_texts, hidden_dim] numpy array
-        """
         self._init_encoder()
-        
         if self._encoder is None:
-            return self._simple_encode(texts)
-        
+            return self._tfidf_encode(texts)
         import torch
-        
-        all_embeddings = []
-        
+        all_embs = []
         for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            
-            inputs = self._tokenizer(
-                batch,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=128,
-            ).to(self._device)
-            
+            batch  = texts[i:i + batch_size]
+            inputs = self._tokenizer(batch, return_tensors="pt", padding=True,
+                                     truncation=True, max_length=64).to(self._device)
             with torch.no_grad():
-                outputs = self._encoder(**inputs)
-                # Mean pooling over sequence
+                out  = self._encoder(**inputs)
                 mask = inputs["attention_mask"].unsqueeze(-1).float()
-                embeddings = (outputs.last_hidden_state * mask).sum(1) / mask.sum(1)
-                # L2 normalize
-                embeddings = embeddings / (embeddings.norm(dim=-1, keepdim=True) + 1e-8)
-                all_embeddings.append(embeddings.cpu().numpy())
-        
-        return np.concatenate(all_embeddings, axis=0)
-    
-    def _simple_encode(self, texts: List[str]) -> np.ndarray:
-        """
-        T5 없이 간단한 텍스트 특성 추출 (fallback)
-        
-        TF-IDF 스타일의 단어 빈도 기반 벡터화
-        """
-        from collections import Counter
-        
-        # 단어 사전 구축
-        all_words = set()
-        for t in texts:
-            all_words.update(t.lower().split())
-        word2idx = {w: i for i, w in enumerate(sorted(all_words))}
-        
-        # TF 벡터 생성
-        embeddings = np.zeros((len(texts), len(word2idx)))
+                emb  = (out.last_hidden_state * mask).sum(1) / mask.sum(1)
+                emb  = emb / (emb.norm(dim=-1, keepdim=True) + 1e-8)
+                all_embs.append(emb.cpu().numpy())
+        return np.concatenate(all_embs, axis=0)
+
+    def _tfidf_encode(self, texts: List[str],
+                      vocab: Optional[dict] = None) -> np.ndarray:
+        if vocab is None:
+            all_words = set()
+            for t in texts:
+                all_words.update(t.lower().split())
+            vocab = {w: i for i, w in enumerate(sorted(all_words))}
+        dim  = max(len(vocab), 1)
+        embs = np.zeros((len(texts), dim))
         for i, t in enumerate(texts):
-            words = t.lower().split()
-            counts = Counter(words)
-            for w, c in counts.items():
-                if w in word2idx:
-                    embeddings[i, word2idx[w]] = c
-        
-        # L2 normalize
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8
-        embeddings = embeddings / norms
-        
-        return embeddings
-    
-    def cluster_concepts(
+            for w in t.lower().split():
+                if w in vocab:
+                    embs[i, vocab[w]] += 1
+        norms = np.linalg.norm(embs, axis=1, keepdims=True) + 1e-8
+        return embs / norms
+
+    def _encode_scene_phrases(self, phrases: List[str],
+                               vocab: Optional[dict] = None) -> np.ndarray:
+        """
+        Scene phrase 전용 인코딩 — 항상 TF-IDF 사용.
+        vocab을 외부에서 넘기면 동일 vocabulary로 인코딩 (차원 일치 보장).
+
+        이유: T5는 "blue colored object" ≈ "black colored object"로 봄.
+             TF-IDF는 색상 단어가 다르면 유사도 0.33 → 완전 분리.
+        """
+        return self._tfidf_encode(phrases, vocab)  # 항상 TF-IDF
+
+    # ── 클러스터링 ────────────────────────────────────────────────
+
+    # 반의어 쌍 (PAIR: side_a vs side_b)
+    # 같은 클러스터에 side_a와 side_b 단어가 모두 있으면 conflict
+    _ANTONYM_PAIRS = [
+        (
+            {"up", "upward", "ascend", "ascending", "ascends", "rise", "rising",
+             "above", "lift", "lifts", "raise", "raises"},
+            {"down", "downward", "descend", "descends", "descending", "descent",
+             "lower", "lowers", "drop", "drops"},
+        ),
+        (
+            {"clockwise"},
+            {"counterclockwise", "counter"},
+        ),
+        (
+            {"left", "leftward"},
+            {"right", "rightward"},
+        ),
+        (
+            {"forward", "extend", "extends"},
+            {"backward", "away", "retract", "retracts"},
+        ),
+    ]
+
+    def _get_phrase_direction_label(self, phrase: str) -> Optional[str]:
+        """phrase에서 방향 레이블 반환. 반의어 쌍에서 어느 쪽인지 식별."""
+        words = set(phrase.lower().replace("-","").split())
+        for i, (side_a, side_b) in enumerate(self._ANTONYM_PAIRS):
+            if words & side_a:
+                return f"pair{i}_a"
+            if words & side_b:
+                return f"pair{i}_b"
+        return None
+
+    # 다른 축(axis) motion 단어 그룹
+    # 수직, 수평, 회전 중 2개 이상의 축이 혼재하면 분리
+    _MOTION_AXES = [
+        {"up","upward","ascend","ascends","rise","above","lift","raise",
+         "down","downward","descend","descends","descent","lower","drop"},  # 수직
+        {"forward","extend","extends","approach","approaches",
+         "backward","retract","retracts","away"},                           # 전후
+        {"left","leftward","right","rightward","lateral"},                  # 좌우
+        {"clockwise","counterclockwise","rotate","rotates","rotating"},     # 회전
+    ]
+
+    def _get_axes(self, phrase: str) -> set:
+        words = set(phrase.lower().replace("-","").split())
+        axes  = set()
+        for i, axis_words in enumerate(self._MOTION_AXES):
+            if words & axis_words:
+                axes.add(i)
+        return axes
+
+    def _has_direction_conflict(self, phrases: List[str]) -> bool:
+        """반의어 또는 다른 축의 motion이 섞여있는지 확인"""
+        # 1. 반의어 쌍 체크
+        for side_a, side_b in self._ANTONYM_PAIRS:
+            has_a = any(set(p.lower().replace("-","").split()) & side_a for p in phrases)
+            has_b = any(set(p.lower().replace("-","").split()) & side_b for p in phrases)
+            if has_a and has_b:
+                return True
+        # 2. 다른 축 motion 혼재 체크 (수직+수평, 수직+회전 등)
+        all_axes: set = set()
+        for p in phrases:
+            all_axes |= self._get_axes(p)
+        if len(all_axes) >= 2:
+            return True
+        return False
+
+    def _split_direction_conflicts(self, clusters: List[dict]) -> List[dict]:
+        """
+        반의어 또는 다른 축의 motion이 섞인 클러스터를 분리.
+        """
+        result = []
+        for cl in clusters:
+            if len(cl["members"]) <= 1 or not self._has_direction_conflict(cl["members"]):
+                result.append(cl)
+                continue
+
+            # 각 phrase의 axis set 기반으로 그룹화
+            # axis가 같은 것끼리 묶고, 다른 axis는 다른 그룹
+            axis_groups: Dict[str, List[str]] = {}
+
+            for phrase in cl["members"]:
+                axes  = self._get_axes(phrase)
+                # 반의어 쌍 레이블도 고려
+                label = self._get_phrase_direction_label(phrase)
+
+                # axis가 없으면 label로, 둘 다 없으면 "other"
+                if axes:
+                    key = "_".join(str(a) for a in sorted(axes))
+                elif label:
+                    key = label
+                else:
+                    key = "other"
+
+                axis_groups.setdefault(key, []).append(phrase)
+
+            for phrases_in_group in axis_groups.values():
+                result.append({
+                    "representative": phrases_in_group[0],
+                    "members":        phrases_in_group,
+                    "size":           len(phrases_in_group),
+                })
+
+        return result
+
+    def _cluster(
         self,
-        concept_names: List[str],
-        descriptions: List[str],
+        phrases: List[str],
         embeddings: np.ndarray,
+        threshold: float,
     ) -> List[dict]:
-        """
-        임베딩 기반 컨셉 클러스터링
-        
-        Agglomerative Clustering with average linkage.
-        Cosine similarity가 threshold 이상인 쌍을 같은 클러스터로 병합.
-        
-        Args:
-            concept_names: ["approach_object", "reach_toward_cube", ...]
-            descriptions: ["Robot arm approaches...", "Robot reaches toward...", ...]
-            embeddings: [N, D] 임베딩 행렬
-            
-        Returns:
-            클러스터 리스트, 각 클러스터는:
-            {
-                "cluster_id": 0,
-                "representative_name": "approach_object",
-                "representative_description": "Robot arm approaches the target",
-                "members": [{"name": ..., "description": ..., "count": ...}, ...],
-                "total_count": 1234,
-            }
-        """
-        N = len(concept_names)
-        
-        # Cosine similarity matrix
-        sim_matrix = embeddings @ embeddings.T
-        
-        # 간단한 agglomerative clustering (Union-Find)
+        """Agglomerative clustering (Union-Find)"""
+        N = len(phrases)
+        if N == 0:
+            return []
+
+        sim    = embeddings @ embeddings.T
         parent = list(range(N))
-        
+
         def find(x):
             while parent[x] != x:
                 parent[x] = parent[parent[x]]
                 x = parent[x]
             return x
-        
+
         def union(x, y):
             px, py = find(x), find(y)
             if px != py:
                 parent[px] = py
-        
-        # 유사도가 높은 쌍 병합
+
         for i in range(N):
             for j in range(i + 1, N):
-                if sim_matrix[i, j] > self.similarity_threshold:
+                if sim[i, j] > threshold:
                     union(i, j)
-        
-        # 클러스터 그룹 생성
-        cluster_groups = defaultdict(list)
+
+        groups = defaultdict(list)
         for i in range(N):
-            cluster_groups[find(i)].append(i)
-        
-        # 클러스터별 대표 선택
+            groups[find(i)].append(i)
+
         clusters = []
-        for cluster_id, (_, members) in enumerate(sorted(cluster_groups.items())):
-            # 클러스터 중심 계산
-            member_embeddings = embeddings[members]
-            centroid = member_embeddings.mean(axis=0)
-            centroid = centroid / (np.linalg.norm(centroid) + 1e-8)
-            
-            # 중심에 가장 가까운 멤버를 대표로 선택
-            similarities = member_embeddings @ centroid
-            best_idx = members[np.argmax(similarities)]
-            
-            # 멤버 정보 수집
-            member_info = []
-            for m in members:
-                member_info.append({
-                    "name": concept_names[m],
-                    "description": descriptions[m],
-                })
-            
+        for _, members in sorted(groups.items()):
+            member_embs = embeddings[members]
+            centroid    = member_embs.mean(0)
+            centroid   /= (np.linalg.norm(centroid) + 1e-8)
+            best        = members[int(np.argmax(member_embs @ centroid))]
             clusters.append({
-                "cluster_id": cluster_id,
-                "representative_name": concept_names[best_idx],
-                "representative_description": descriptions[best_idx],
-                "members": member_info,
-                "total_count": len(members),
+                "representative": phrases[best],
+                "members":        [phrases[m] for m in members],
+                "size":           len(members),
             })
-        
-        # 크기 순으로 정렬 (큰 클러스터가 더 중요)
-        clusters.sort(key=lambda x: -x["total_count"])
-        
+        clusters.sort(key=lambda x: -x["size"])
         return clusters
-    
-    def build_concept_pool(
+
+    def _build_pool_from_clusters(
         self,
         clusters: List[dict],
-        raw_annotations: List[dict],
+        phrase_counts: Counter,
+        concept_type: str,
+        max_size: int,
     ) -> List[dict]:
-        """
-        최종 concept pool 구축
-        
-        Args:
-            clusters: 클러스터링 결과
-            raw_annotations: 원본 annotation 데이터 (빈도 계산용)
-            
-        Returns:
-            concept_pool: [
-                {
-                    "concept_id": 0,
-                    "name": "approach_object",
-                    "description": "Robot arm approaches the target object",
-                    "frequency": 4523,
-                    "frequency_pct": 19.6,
-                    "cluster_size": 15,
-                    "variants": ["approach_object", "reach_toward", "move_to_object"],
-                },
-                ...
-            ]
-        """
-        # 전체 annotation에서 concept 빈도 계산
-        concept_counts = Counter()
-        for ann in raw_annotations:
-            concept_counts[ann["action_concept"]] += 1
-        
-        total_annotations = len(raw_annotations)
-        
-        concept_pool = []
-        
-        for cluster in clusters:
-            # 클러스터 내 모든 멤버의 빈도 합산
-            cluster_freq = sum(
-                concept_counts.get(m["name"], 0) for m in cluster["members"]
-            )
-            
-            # 최소 빈도 필터링
-            if cluster_freq < self.min_frequency:
+        """클러스터 → concept pool"""
+        total = sum(phrase_counts.values())
+        pool  = []
+
+        for cl in clusters:
+            # 클러스터 내 전체 빈도 합산
+            freq = sum(phrase_counts.get(p, 0) for p in cl["members"])
+            if freq < self.min_frequency:
                 continue
-            
-            # max_concepts 제한
-            if len(concept_pool) >= self.max_concepts:
+            if len(pool) >= max_size:
                 break
-            
-            # 변형 이름 목록 (상위 5개)
+
+            # 대표 이름: representative phrase → snake_case 단축
+            rep   = cl["representative"]
+            base  = "_".join(rep.lower().split()[:4])  # 앞 4단어
+            # 중복 이름 방지: 이미 사용된 이름이면 단어 추가
+            name  = base
+            used_names = {c["name"] for c in pool}
+            extra = 5
+            while name in used_names and extra <= len(rep.lower().split()):
+                name = "_".join(rep.lower().split()[:extra])
+                extra += 1
+            if name in used_names:
+                name = f"{base}_{len(pool)}"
+
+            # 상위 5개 변형
             variants = sorted(
-                [(m["name"], concept_counts.get(m["name"], 0)) for m in cluster["members"]],
-                key=lambda x: -x[1]
+                cl["members"],
+                key=lambda p: -phrase_counts.get(p, 0)
             )[:5]
-            
-            concept_pool.append({
-                "concept_id": len(concept_pool),
-                "name": cluster["representative_name"],
-                "description": cluster["representative_description"],
-                "frequency": cluster_freq,
-                "frequency_pct": round(100 * cluster_freq / max(total_annotations, 1), 1),
-                "cluster_size": cluster["total_count"],
-                "variants": [v[0] for v in variants],
+
+            pool.append({
+                "concept_id":    len(pool),
+                "concept_type":  concept_type,
+                "name":          name,
+                "description":   rep,
+                "frequency":     freq,
+                "frequency_pct": round(100 * freq / max(total, 1), 1),
+                "cluster_size":  cl["size"],
+                "variants":      variants,
             })
-        
-        return concept_pool
-    
-    def map_annotations_to_pool(
-        self,
-        raw_annotations: List[dict],
-        concept_pool: List[dict],
-        pool_embeddings: np.ndarray,
-        all_embeddings: np.ndarray,
-        all_names: List[str],
-    ) -> List[dict]:
-        """
-        원본 annotation을 concept pool ID로 매핑
-        
-        각 raw annotation의 concept를 가장 가까운 pool concept에 매핑합니다.
-        
-        Returns:
-            최종 데이터셋 엔트리 리스트
-        """
-        # 이름 → 임베딩 인덱스 매핑
-        name_to_idx = {name: idx for idx, name in enumerate(all_names)}
-        
-        # Pool concept 이름 → pool ID
-        pool_name_to_id = {}
-        for concept in concept_pool:
-            pool_name_to_id[concept["name"]] = concept["concept_id"]
-            for variant in concept["variants"]:
-                pool_name_to_id[variant] = concept["concept_id"]
-        
-        dataset = []
-        
-        for ann in raw_annotations:
-            concept_name = ann["action_concept"]
-            
-            # 직접 매핑 시도
-            if concept_name in pool_name_to_id:
-                pool_id = pool_name_to_id[concept_name]
-            else:
-                # 임베딩 유사도로 가장 가까운 pool concept 찾기
-                if concept_name in name_to_idx:
-                    ann_emb = all_embeddings[name_to_idx[concept_name]]
-                    similarities = pool_embeddings @ ann_emb
-                    pool_id = int(np.argmax(similarities))
-                else:
-                    pool_id = 0  # 매핑 실패 시 첫 번째 concept
-            
-            entry = {
-                "episode_id": ann["episode_id"],
-                "segment_id": ann["segment_id"],
-                "start_frame": ann["start_frame"],
-                "end_frame": ann["end_frame"],
-                "representative_frame": ann["representative_frame"],
-                "task_description": ann.get("task_description", ""),
-                "concept_id": pool_id,
-                "concept_name": concept_pool[pool_id]["name"],
-                "original_concept": concept_name,
-                "description": ann["description"],
-                "image_description": ann.get("image_description", ""),
-            }
-            
-            dataset.append(entry)
-        
-        return dataset
-    
+
+        return pool
+
+    # ── 메인 파이프라인 ───────────────────────────────────────────
+
     def refine_and_build(
         self,
         raw_concepts: List[dict],
         segments: List[dict],
-    ) -> Tuple[List[dict], List[dict]]:
+    ) -> Tuple[List[dict], List[dict], List[dict]]:
         """
-        전체 정제 파이프라인 실행
-        
-        Args:
-            raw_concepts: Gemini가 생성한 원본 annotation 리스트
-            segments: AutoSegmenter 출력 (에피소드별 세그먼트)
-            
+        LaBo/CLG-CBM 스타일 Dual Concept Pool 구축.
+
         Returns:
-            concept_pool: 정제된 컨셉 풀
-            final_dataset: 컨셉 ID가 매핑된 최종 데이터셋
+            action_pool:   ordered motion phrase clusters
+            scene_pool:    visual attribute phrase clusters
+            final_dataset: segment별 concept ID 매핑
         """
         if not raw_concepts:
-            print("  [WARNING] No raw concepts to refine.")
-            return [], []
-        
-        # 1. 고유 컨셉 추출
-        unique_concepts = {}  # name → description
+            print("  [WARNING] No raw concepts.")
+            return [], [], []
+
+        # ── 1. phrase 수집 ────────────────────────────────────────
+        # Action: 각 세그먼트의 ordered list 원소들을 모두 수집
+        action_phrase_counts: Counter = Counter()
+        # Scene: 각 세그먼트의 attribute phrase들을 모두 수집
+        scene_phrase_counts:  Counter = Counter()
+
         for ann in raw_concepts:
-            name = ann["action_concept"]
-            desc = ann["description"]
-            if name not in unique_concepts:
-                unique_concepts[name] = desc
-        
-        concept_names = list(unique_concepts.keys())
-        descriptions = list(unique_concepts.values())
-        
-        print(f"  Unique raw concepts: {len(concept_names)}")
-        
-        # 2. T5 인코더로 임베딩
+            # action_concepts는 ordered list
+            a_phrases = ann.get("action_concepts", [])
+            if isinstance(a_phrases, str):
+                a_phrases = [a_phrases]
+            for p in a_phrases:
+                if isinstance(p, str) and p.strip():
+                    action_phrase_counts[p.strip().lower()] += 1
+
+            # scene_concepts는 attribute phrase list
+            s_phrases = ann.get("scene_concepts", [])
+            if isinstance(s_phrases, str):
+                s_phrases = [s_phrases]
+            for p in s_phrases:
+                if isinstance(p, str) and p.strip():
+                    scene_phrase_counts[p.strip().lower()] += 1
+
+        print(f"  Unique action phrases: {len(action_phrase_counts)}")
+        print(f"  Unique scene  phrases: {len(scene_phrase_counts)}")
+
+        # ── 2. T5 임베딩 ─────────────────────────────────────────
         print("  Computing T5 embeddings...")
-        embeddings = self._encode_texts(descriptions)
-        print(f"  Embedding shape: {embeddings.shape}")
-        
-        # 3. 클러스터링
-        print(f"  Clustering (threshold={self.similarity_threshold})...")
-        clusters = self.cluster_concepts(concept_names, descriptions, embeddings)
-        print(f"  Clusters formed: {len(clusters)}")
-        
-        # 4. Concept pool 구축
-        concept_pool = self.build_concept_pool(clusters, raw_concepts)
-        print(f"  Concept pool size: {len(concept_pool)}")
-        
-        # 5. Pool concept 임베딩 계산
-        pool_descriptions = [c["description"] for c in concept_pool]
-        if pool_descriptions:
-            pool_embeddings = self._encode_texts(pool_descriptions)
+
+        a_phrases = list(action_phrase_counts.keys())
+        s_phrases = list(scene_phrase_counts.keys())
+
+        # Action: T5 — 같은 의미의 다른 표현 감지 (paraphrase 합침)
+        a_embs = self._encode_texts(a_phrases) if a_phrases else np.zeros((0,1))
+
+        # Scene: TF-IDF — 전체 scene phrase로 공유 vocabulary 먼저 구축
+        # → s_embs와 s_pool_embs가 같은 vocab으로 인코딩되어 차원 일치 보장
+        if s_phrases:
+            all_words = set()
+            for p in s_phrases:
+                all_words.update(p.lower().split())
+            self._scene_shared_vocab = {w: i for i, w in enumerate(sorted(all_words))}
+            s_embs = self._encode_scene_phrases(s_phrases, self._scene_shared_vocab)
         else:
-            pool_embeddings = np.zeros((0, embeddings.shape[1] if embeddings.ndim > 1 else 1))
-        
-        # 6. 원본 annotation을 pool ID로 매핑
-        print("  Mapping annotations to concept pool...")
-        final_dataset = self.map_annotations_to_pool(
-            raw_annotations=raw_concepts,
-            concept_pool=concept_pool,
-            pool_embeddings=pool_embeddings,
-            all_embeddings=embeddings,
-            all_names=concept_names,
+            self._scene_shared_vocab = {}
+            s_embs = np.zeros((0, 1))
+
+        print(f"  Action emb (T5):    {a_embs.shape}")
+        print(f"  Scene  emb (TF-IDF):{s_embs.shape} vocab={len(self._scene_shared_vocab)}")
+
+        # ── 3. 클러스터링 ─────────────────────────────────────────
+        # Action: 0.95 — 거의 동일 표현만 합침 (방향 혼합 방지)
+        # Scene:  0.88 — 같은 속성 다르게 표현한 것만 합침
+        a_threshold = min(self.similarity_threshold + 0.10, 0.97)
+        s_threshold = min(self.similarity_threshold + 0.03, 0.92)
+        print(f"  Clustering (action={a_threshold:.2f}, scene={s_threshold:.2f})...")
+
+        a_clusters_raw = self._cluster(a_phrases, a_embs, a_threshold) if a_phrases else []
+        # 방향 반의어가 섞인 클러스터 강제 분리
+        a_clusters = self._split_direction_conflicts(a_clusters_raw)
+        s_clusters = self._cluster(s_phrases, s_embs, s_threshold) if s_phrases else []
+        print(f"  Action clusters after direction split: {len(a_clusters)}")
+        print(f"  Action clusters: {len(a_clusters)}")
+        print(f"  Scene  clusters: {len(s_clusters)}")
+
+        # ── 4. Pool 구축 ──────────────────────────────────────────
+        action_pool = self._build_pool_from_clusters(
+            a_clusters, action_phrase_counts, "action", self.max_action_concepts
         )
-        
-        # 7. 에피소드별 순서 정보 추가
-        print("  Adding order information...")
-        episode_groups = defaultdict(list)
-        for entry in final_dataset:
-            episode_groups[entry["episode_id"]].append(entry)
-        
-        for ep_id, entries in episode_groups.items():
+        scene_pool = self._build_pool_from_clusters(
+            s_clusters, scene_phrase_counts, "scene", self.max_scene_concepts
+        )
+        print(f"  Action pool: {len(action_pool)}")
+        print(f"  Scene  pool: {len(scene_pool)}")
+
+        # ── 5. Pool 임베딩 (매핑용) ───────────────────────────────
+        # action pool: T5
+        a_pool_embs = (self._encode_texts([c["description"] for c in action_pool])
+                       if action_pool else np.zeros((0,1)))
+        # scene pool: 같은 shared_vocab으로 TF-IDF (차원 일치)
+        scene_vocab = getattr(self, "_scene_shared_vocab", {})
+        s_pool_embs = (self._encode_scene_phrases([c["description"] for c in scene_pool], scene_vocab)
+                       if scene_pool and scene_vocab
+                       else np.zeros((len(scene_pool), max(len(scene_vocab), 1))))
+
+        # ── 6. phrase → pool_id 매핑 ──────────────────────────────
+        def _build_map(phrases, pool, pool_embs, phrase_embs) -> Dict[str, int]:
+            """각 raw phrase를 가장 가까운 pool concept에 매핑"""
+            name2id: Dict[str, int] = {}
+            # 직접 매핑
+            for c in pool:
+                name2id[c["description"]] = c["concept_id"]
+                for v in c["variants"]:
+                    name2id[v] = c["concept_id"]
+            # 임베딩 유사도 매핑
+            if len(pool_embs) > 0 and len(phrase_embs) > 0:
+                p2idx = {p: i for i, p in enumerate(phrases)}
+                for p in phrases:
+                    if p not in name2id and p in p2idx:
+                        sims = pool_embs @ phrase_embs[p2idx[p]]
+                        name2id[p] = int(np.argmax(sims))
+            return name2id
+
+        a_map = _build_map(a_phrases, action_pool, a_pool_embs, a_embs)
+        # scene 매핑도 TF-IDF 임베딩 사용 (s_embs가 이미 TF-IDF)
+        s_map = _build_map(s_phrases, scene_pool,  s_pool_embs, s_embs)
+
+        # ── 7. 최종 dataset 구성 ──────────────────────────────────
+        print("  Building final dataset...")
+        dataset = []
+
+        for ann in raw_concepts:
+            # action: ordered list → 각 phrase의 pool_id (순서 유지)
+            a_phrases_raw = ann.get("action_concepts", [])
+            if isinstance(a_phrases_raw, str):
+                a_phrases_raw = [a_phrases_raw]
+            active_action_ids = []
+            for p in a_phrases_raw:
+                p = p.strip().lower()
+                if p in a_map:
+                    cid = a_map[p]
+                    if cid not in active_action_ids:
+                        active_action_ids.append(cid)
+
+            # scene: attribute phrases → 각각의 pool_id
+            s_phrases_raw = ann.get("scene_concepts", [])
+            if isinstance(s_phrases_raw, str):
+                s_phrases_raw = [s_phrases_raw]
+            active_scene_ids = []
+            for p in s_phrases_raw:
+                p = p.strip().lower()
+                if p in s_map:
+                    cid = s_map[p]
+                    if cid not in active_scene_ids:
+                        active_scene_ids.append(cid)
+
+            dataset.append({
+                "episode_id":           ann["episode_id"],
+                "segment_id":           ann["segment_id"],
+                "start_frame":          ann["start_frame"],
+                "end_frame":            ann["end_frame"],
+                "representative_frame": ann["representative_frame"],
+                "task_description":     ann.get("task_description", ""),
+                "robot_type":           ann.get("robot_type", "unknown"),
+                # action
+                "action_concepts":      a_phrases_raw,       # 원본 ordered phrases
+                "active_action_ids":    active_action_ids,    # ordered pool IDs
+                "action_description":   ann.get("action_description",""),
+                # scene
+                "scene_concepts":       s_phrases_raw,        # 원본 attribute phrases
+                "active_scene_ids":     active_scene_ids,     # pool IDs
+                "scene_description":    ann.get("scene_description",""),
+                # 하위 호환
+                "action_concept_id":    active_action_ids[0] if active_action_ids else 0,
+                "scene_concept_id":     active_scene_ids[0]  if active_scene_ids  else 0,
+            })
+
+        # 에피소드 순서 정보
+        ep_groups = defaultdict(list)
+        for entry in dataset:
+            ep_groups[entry["episode_id"]].append(entry)
+        for ep_id, entries in ep_groups.items():
             entries.sort(key=lambda x: x["segment_id"])
             for order, entry in enumerate(entries):
-                entry["order_in_episode"] = order
-                entry["total_concepts_in_episode"] = len(entries)
-                # 에피소드 내 활성 컨셉 ID 리스트
-                entry["episode_concept_ids"] = [e["concept_id"] for e in entries]
-        
-        return concept_pool, final_dataset
+                entry["order_in_episode"]           = order
+                entry["total_segs_in_episode"]      = len(entries)
+                entry["episode_action_concept_ids"] = [
+                    aid for e in entries for aid in e["active_action_ids"]]
+                entry["episode_scene_concept_ids"]  = [
+                    sid for e in entries for sid in e["active_scene_ids"]]
+
+        return action_pool, scene_pool, dataset
 
 
 if __name__ == "__main__":
-    print("Testing ConceptRefiner...")
-    
-    refiner = ConceptRefiner(
-        similarity_threshold=0.85,
-        max_concepts=50,
-        min_frequency=2,
-    )
-    
-    # 더미 raw concepts 생성
-    dummy_concepts = []
-    concept_templates = [
-        ("approach_object", "Robot arm approaches the target object"),
-        ("reach_toward", "Robot reaches toward the item on the table"),
-        ("move_to_object", "Robot moves toward the target"),
-        ("grasp_object", "Robot gripper closes to grasp the object"),
-        ("grip_item", "Robot grips the item firmly"),
-        ("lift_object", "Robot lifts the grasped object upward"),
-        ("raise_object", "Robot raises the object from the surface"),
-        ("transport_object", "Robot transports the object to a new location"),
-        ("move_right", "Robot moves the held object to the right"),
-        ("carry_to_target", "Robot carries the object toward the target zone"),
-        ("lower_object", "Robot lowers the object toward the surface"),
-        ("place_object", "Robot places the object down on the surface"),
-        ("release_object", "Robot gripper opens to release the object"),
-        ("retract", "Robot arm retracts after completing the task"),
-        ("stabilize", "Robot holds position to stabilize"),
-    ]
-    
-    import random
-    random.seed(42)
-    
-    for ep_id in range(50):
-        # 에피소드당 3~5개 세그먼트
-        n_segs = random.randint(3, 5)
-        for seg_id in range(n_segs):
-            template = random.choice(concept_templates)
-            dummy_concepts.append({
-                "episode_id": ep_id,
-                "segment_id": seg_id,
-                "start_frame": seg_id * 100,
-                "end_frame": (seg_id + 1) * 100,
-                "representative_frame": seg_id * 100 + 50,
-                "action_concept": template[0],
-                "description": template[1],
-                "image_description": f"Robot arm on table for episode {ep_id}",
-                "task_description": f"Task {ep_id}",
+    print("Testing LaBo-style ConceptRefiner...")
+    refiner = ConceptRefiner(similarity_threshold=0.85, min_frequency=1)
+
+    dummy = []
+    for ep_id in range(5):
+        segs = [
+            {"action_concepts": ["arm extends forward toward target object",
+                                  "gripper opens wide in preparation"],
+             "scene_concepts":  ["green colored object",
+                                  "cylindrical shaped object",
+                                  "object at center of workspace"]},
+            {"action_concepts": ["arm descends and aligns above target",
+                                  "fingers close around object to secure grip",
+                                  "gripper tightens for stable hold"],
+             "scene_concepts":  ["green colored object",
+                                  "cylindrical shaped object",
+                                  "object near the gripper"]},
+            {"action_concepts": ["arm lifts object upward away from surface",
+                                  "gripper maintains firm hold during lift"],
+             "scene_concepts":  ["green colored object",
+                                  "object held above surface"]},
+        ]
+        for seg_id, s in enumerate(segs):
+            dummy.append({
+                "episode_id": ep_id, "segment_id": seg_id,
+                "start_frame": seg_id*100, "end_frame": (seg_id+1)*100,
+                "representative_frame": seg_id*100+50,
+                "action_concepts":    s["action_concepts"],
+                "action_description": " ".join(s["action_concepts"]),
+                "scene_concepts":     s["scene_concepts"],
+                "scene_description":  " | ".join(s["scene_concepts"]),
+                "task_description":   "pick and place green cylinder",
+                "robot_type":         "so101",
             })
-    
-    print(f"\nDummy raw concepts: {len(dummy_concepts)}")
-    
-    # 정제 실행
-    concept_pool, dataset = refiner.refine_and_build(
-        raw_concepts=dummy_concepts,
-        segments=[],
-    )
-    
-    print(f"\n=== Concept Pool ({len(concept_pool)} concepts) ===")
-    for c in concept_pool:
-        print(f"  [{c['concept_id']:2d}] {c['name']:25s} | freq={c['frequency']:4d} "
-              f"({c['frequency_pct']:5.1f}%) | variants={c['variants'][:3]}")
-    
-    print(f"\n=== Dataset Sample (first 5 entries) ===")
-    for entry in dataset[:5]:
-        print(f"  ep={entry['episode_id']:2d} seg={entry['segment_id']} "
-              f"→ concept_id={entry['concept_id']} ({entry['concept_name']}) "
-              f"| order={entry['order_in_episode']}/{entry['total_concepts_in_episode']}")
-    
-    print(f"\n=== Final Data Structure ===")
-    sample = dataset[0]
-    print(json.dumps(sample, indent=2, ensure_ascii=False))
-    
-    print("\n✓ ConceptRefiner test completed!")
+
+    action_pool, scene_pool, dataset = refiner.refine_and_build(dummy, [])
+
+    print(f"\n=== Action Pool ({len(action_pool)}) ===")
+    for c in action_pool:
+        print(f"  [{c['concept_id']:2d}] {c['name']:35s} freq={c['frequency']:3d} | {c['description'][:60]}")
+
+    print(f"\n=== Scene Pool ({len(scene_pool)}) ===")
+    for c in scene_pool:
+        print(f"  [{c['concept_id']:2d}] {c['name']:30s} freq={c['frequency']:3d} | {c['description']}")
+
+    print(f"\n=== Dataset Sample (ep0, seg0) ===")
+    e = dataset[0]
+    print(f"  action_concepts:   {e['action_concepts']}")
+    print(f"  active_action_ids: {e['active_action_ids']}")
+    print(f"  scene_concepts:    {e['scene_concepts']}")
+    print(f"  active_scene_ids:  {e['active_scene_ids']}")
+    print("\n✓ Done")

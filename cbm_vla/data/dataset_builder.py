@@ -369,9 +369,14 @@ def _parse_episode_dict(
     global_episode_offset: int,
     sub_ds: SubDatasetInfo,
     dataset_root: Optional[str],
+    task_map: Optional[Dict[int, str]] = None,
+    fallback_task: str = "",
 ) -> Optional[dict]:
     """
     parquet dict → 에피소드 딕셔너리로 변환 (padding 포함)
+
+    task_map: tasks.jsonl에서 읽은 {task_index: task_description}
+    fallback_task: task_map도 없고 parquet에도 없을 때 사용할 추론 description
     """
     if "action" not in df or len(df["action"]) == 0:
         return None
@@ -391,18 +396,37 @@ def _parse_episode_dict(
         states_np = np.zeros_like(actions_np)
         actual_state_dim = actual_action_dim
 
-    # task description
+    # ── task description 추출 (우선순위) ──────────────────────────────
+    # 1. task_index → tasks.jsonl 매핑
+    # 2. parquet의 task/language_instruction 컬럼 텍스트
+    # 3. dataset 이름 기반 추론 (fallback)
     task_desc = ""
-    for task_key in ["task", "language_instruction", "task_description"]:
-        if task_key in df and len(df[task_key]) > 0:
-            val = df[task_key][0]
-            if isinstance(val, bytes):
-                task_desc = val.decode("utf-8", errors="ignore")
-            elif isinstance(val, str):
-                task_desc = val
-            else:
-                task_desc = str(val)
-            break
+
+    # 1) task_index 기반
+    if task_map and "task_index" in df and len(df["task_index"]) > 0:
+        idx = df["task_index"][0]
+        if hasattr(idx, "item"):
+            idx = idx.item()
+        task_desc = task_map.get(int(idx), "")
+
+    # 2) 텍스트 컬럼 직접 읽기
+    if not task_desc:
+        for task_key in ["task", "language_instruction", "task_description"]:
+            if task_key in df and len(df[task_key]) > 0:
+                val = df[task_key][0]
+                if isinstance(val, bytes):
+                    candidate = val.decode("utf-8", errors="ignore")
+                elif isinstance(val, str):
+                    candidate = val
+                else:
+                    candidate = str(val)
+                if candidate and candidate not in ("None", "nan", ""):
+                    task_desc = candidate
+                    break
+
+    # 3) 이름 기반 추론 fallback
+    if not task_desc:
+        task_desc = fallback_task or _infer_task_from_dataset_name(sub_ds.dataset_name)
 
     # ── zero-padding (joint 차원만, done 제외) ──────────────────────────
     def pad_to(arr, target_dim):
@@ -511,6 +535,62 @@ def _collect_episode_parquet_files_hub(
         return {}
 
 
+def _fetch_tasks_from_hub(hub_repo_id: str, hub_path_prefix: str) -> Dict[int, str]:
+    """
+    Hub에서 meta/tasks.jsonl을 읽어 task_index → task_description 매핑 반환.
+
+    LeRobot v2 구조:
+      meta/tasks.jsonl: {"task_index": 0, "task": "Pick up the red cube"}
+    """
+    try:
+        from huggingface_hub import HfFileSystem
+        fs = HfFileSystem()
+        tasks_path = f"datasets/{hub_repo_id}/{hub_path_prefix}/meta/tasks.jsonl"
+
+        if not fs.exists(tasks_path):
+            return {}
+
+        with fs.open(tasks_path, "r") as f:
+            lines = f.read().strip().split("\n")
+
+        task_map: Dict[int, str] = {}
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+                idx  = obj.get("task_index", obj.get("index", len(task_map)))
+                desc = obj.get("task", obj.get("description", ""))
+                if desc:
+                    task_map[int(idx)] = desc
+            except Exception:
+                continue
+
+        return task_map
+
+    except Exception:
+        return {}
+
+
+def _infer_task_from_dataset_name(dataset_name: str) -> str:
+    """
+    tasks.jsonl이 없을 때 데이터셋 이름에서 task description 추론.
+    예) "so100_battery_bin" → "battery bin manipulation task"
+        "pick_lemon_and_drop_in_bowl" → "pick lemon and drop in bowl"
+    """
+    # 앞의 로봇 모델명 제거 (so100_, so101_, koch_ 등)
+    name = dataset_name
+    for prefix in ["so100_", "so101_", "so_arm100_", "koch_", "lekiwi_",
+                   "aloha_", "svla_so100_", "svla_so101_"]:
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+
+    # snake_case → 자연어
+    words = name.replace("-", "_").split("_")
+    return " ".join(words) + " task"
+
+
 def load_episodes_from_sub_dataset(
     sub_ds: SubDatasetInfo,
     max_episodes: Optional[int] = None,
@@ -552,15 +632,36 @@ def load_episodes_from_sub_dataset(
         if max_episodes:
             ep_nums = ep_nums[:max_episodes]
 
-        videos_dir = Path(sub_ds.local_root) / "videos"
+        videos_dir  = Path(sub_ds.local_root) / "videos"
         dataset_root = str(sub_ds.local_root) if videos_dir.exists() else None
+
+        # 로컬 tasks.jsonl 읽기
+        tasks_path = Path(sub_ds.local_root) / "meta" / "tasks.jsonl"
+        task_map: Dict[int, str] = {}
+        if tasks_path.exists():
+            with open(tasks_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        idx  = obj.get("task_index", obj.get("index", len(task_map)))
+                        desc = obj.get("task", obj.get("description", ""))
+                        if desc:
+                            task_map[int(idx)] = desc
+                    except Exception:
+                        continue
+        fallback_task = _infer_task_from_dataset_name(sub_ds.dataset_name)
 
         episodes = []
         for ep_num in ep_nums:
             df = _read_parquet_to_dict(episode_files[ep_num])
             if df is None:
                 continue
-            ep = _parse_episode_dict(df, ep_num, global_episode_offset, sub_ds, dataset_root)
+            ep = _parse_episode_dict(df, ep_num, global_episode_offset, sub_ds,
+                                     dataset_root, task_map=task_map,
+                                     fallback_task=fallback_task)
             if ep:
                 episodes.append(ep)
         return episodes
@@ -573,6 +674,11 @@ def load_episodes_from_sub_dataset(
         except ImportError:
             print("    [WARNING] huggingface_hub not installed")
             return _fallback_dummy_episodes(sub_ds, max_episodes or 5, global_episode_offset)
+
+        # tasks.jsonl에서 task description 먼저 로드
+        task_map = _fetch_tasks_from_hub(sub_ds.hub_repo_id, sub_ds.hub_path_prefix)
+        # fallback: dataset 이름에서 추론
+        fallback_task = _infer_task_from_dataset_name(sub_ds.dataset_name)
 
         episode_files = _collect_episode_parquet_files_hub(
             hub_repo_id=sub_ds.hub_repo_id,
@@ -598,7 +704,10 @@ def load_episodes_from_sub_dataset(
                 print(f"    [WARNING] Cannot read {hf_path}: {e}")
                 continue
 
-            ep = _parse_episode_dict(df, ep_num, global_episode_offset, sub_ds, dataset_root=None)
+            ep = _parse_episode_dict(df, ep_num, global_episode_offset, sub_ds,
+                                     dataset_root=None,
+                                     task_map=task_map,
+                                     fallback_task=fallback_task)
             if ep:
                 episodes.append(ep)
 
@@ -928,20 +1037,25 @@ class SmolVLACommunityDatasetBuilder:
         # ============================================================
         print("\n[Step 5] Running T5 Concept Refinement...")
 
-        concept_pool, final_dataset = self.refiner.refine_and_build(
+        action_pool, scene_pool, final_dataset = self.refiner.refine_and_build(
             raw_concepts=all_annotations,
             segments=all_segmentations,
         )
 
-        print(f"  Concept pool: {len(concept_pool)} concepts")
+        print(f"  Action pool: {len(action_pool)} concepts")
+        print(f"  Scene  pool: {len(scene_pool)} concepts")
         print(f"  Final dataset: {len(final_dataset):,} entries")
 
-        if concept_pool:
-            print("\n  Top 15 concepts:")
-            for c in concept_pool[:15]:
-                print(f"    [{c['concept_id']:2d}] {c['name']:25s} "
-                      f"| freq={c['frequency']:5d} ({c['frequency_pct']:5.1f}%)"
-                      f" | cluster_size={c['cluster_size']}")
+        if action_pool:
+            print("\n  Top 10 Action concepts:")
+            for c in action_pool[:10]:
+                print(f"    [{c['concept_id']:2d}] {c['name']:30s} "
+                      f"| freq={c['frequency']:5d} ({c['frequency_pct']:5.1f}%)")
+        if scene_pool:
+            print("\n  Top 10 Scene concepts:")
+            for c in scene_pool[:10]:
+                print(f"    [{c['concept_id']:2d}] {c['name']:30s} "
+                      f"| freq={c['frequency']:5d} ({c['frequency_pct']:5.1f}%)")
 
         # ============================================================
         # Step 6: Concept ↔ Episode 매핑
@@ -960,25 +1074,30 @@ class SmolVLACommunityDatasetBuilder:
                 continue
 
             concepts.sort(key=lambda x: x["segment_id"])
-            active_concept_ids = list(set(c["concept_id"] for c in concepts))
-            concept_order = [c["concept_id"] for c in concepts]
 
             training_entries.append({
-                "episode_id": ep_id,
-                "repo_id": ep["repo_id"],
-                "contributor": ep["contributor"],
-                "community_version": ep["community_version"],
-                "robot_type": ep["robot_type"],
-                "actual_action_dim": ep["actual_action_dim"],
-                "action_mask": ep["action_mask"].tolist(),
+                "episode_id":       ep_id,
+                "repo_id":          ep["repo_id"],
+                "contributor":      ep["contributor"],
+                "community_version":ep["community_version"],
+                "robot_type":       ep["robot_type"],
+                "actual_action_dim":ep["actual_action_dim"],
+                "action_mask":      ep["action_mask"].tolist(),
                 "task_description": ep["task_description"],
-                "num_frames": ep["num_frames"],
-                "fps": ep["fps"],
-                "active_concept_ids": active_concept_ids,
-                "concept_order": concept_order,
+                "num_frames":       ep["num_frames"],
+                "fps":              ep["fps"],
+                # action concept
+                "active_action_concept_ids": list(set(c["action_concept_id"] for c in concepts)),
+                "action_concept_order":      [c["action_concept_id"] for c in concepts],
+                # scene concept
+                "active_scene_concept_ids":  list(set(c["scene_concept_id"] for c in concepts)),
+                "scene_concept_order":       [c["scene_concept_id"] for c in concepts],
                 "segments": concepts,
-                "frame_to_concept": self._build_frame_concept_map(
-                    concepts, ep["num_frames"], len(concept_pool)
+                "frame_to_action_concept": self._build_frame_concept_map(
+                    concepts, ep["num_frames"], len(action_pool), concept_key="action_concept_id"
+                ),
+                "frame_to_scene_concept": self._build_frame_concept_map(
+                    concepts, ep["num_frames"], len(scene_pool),  concept_key="scene_concept_id"
                 ),
             })
 
@@ -1003,7 +1122,8 @@ class SmolVLACommunityDatasetBuilder:
             "total_frames": load_stats["total_frames"],
             "total_training_entries": len(training_entries),
             "total_segments": total_segments,
-            "num_concepts": len(concept_pool),
+            "num_action_concepts": len(action_pool),
+            "num_scene_concepts":  len(scene_pool),
             "max_action_dim": ACTION_DIM_WITH_DONE,   # 15 (14 joints + done)
             "max_state_dim": MAX_STATE_DIM,
             "robot_type_distribution": dict(robot_stats),
@@ -1013,15 +1133,22 @@ class SmolVLACommunityDatasetBuilder:
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-        # concept_pool.json
-        pool_path = self.output_dir / "concept_pool.json"
-        with open(pool_path, 'w') as f:
-            json.dump(concept_pool, f, indent=2, ensure_ascii=False)
-        print(f"  Saved concept pool → {pool_path}")
+        # concept pools 저장 (action / scene 분리)
+        action_pool_path = self.output_dir / "action_concept_pool.json"
+        with open(action_pool_path, 'w') as f:
+            json.dump(action_pool, f, indent=2, ensure_ascii=False)
+        print(f"  Saved action concept pool → {action_pool_path}")
+
+        scene_pool_path = self.output_dir / "scene_concept_pool.json"
+        with open(scene_pool_path, 'w') as f:
+            json.dump(scene_pool, f, indent=2, ensure_ascii=False)
+        print(f"  Saved scene concept pool  → {scene_pool_path}")
 
         # training_entries.json (frame_to_concept 제외)
+        # frame_to_*_concept 는 numpy array → npy로 별도 저장, JSON 제외
+        _exclude = {"frame_to_concept", "frame_to_action_concept", "frame_to_scene_concept"}
         entries_for_json = [
-            {k: v for k, v in e.items() if k != "frame_to_concept"}
+            {k: v for k, v in e.items() if k not in _exclude}
             for e in training_entries
         ]
         entries_path = self.output_dir / "training_entries.json"
@@ -1029,14 +1156,16 @@ class SmolVLACommunityDatasetBuilder:
             json.dump(entries_for_json, f, indent=2, ensure_ascii=False)
         print(f"  Saved training entries → {entries_path}")
 
-        # frame-level labels (numpy)
+        # frame-level labels (numpy) — action / scene 각각 저장
         labels_dir = self.output_dir / "frame_labels"
         labels_dir.mkdir(exist_ok=True)
         for entry in training_entries:
             ep_id = entry["episode_id"]
-            label_path = labels_dir / f"episode_{ep_id:06d}_concepts.npy"
-            np.save(label_path, entry["frame_to_concept"])
-        print(f"  Saved frame labels → {labels_dir}/")
+            np.save(labels_dir / f"episode_{ep_id:06d}_action.npy",
+                    entry["frame_to_action_concept"])
+            np.save(labels_dir / f"episode_{ep_id:06d}_scene.npy",
+                    entry["frame_to_scene_concept"])
+        print(f"  Saved frame labels (action+scene) → {labels_dir}/")
 
         # dataset_info.json
         info_path = self.output_dir / "dataset_info.json"
@@ -1050,15 +1179,17 @@ class SmolVLACommunityDatasetBuilder:
         print(f"  Sub-datasets: {len(all_sub_datasets)}")
         print(f"  Episodes: {len(all_episodes):,}")
         print(f"  Segments: {total_segments:,}")
-        print(f"  Concepts: {len(concept_pool)}")
+        print(f"  Action concepts: {len(action_pool)}")
+        print(f"  Scene  concepts: {len(scene_pool)}")
         print(f"  Training entries: {len(training_entries):,}")
         print(f"  Output: {self.output_dir}")
         print("=" * 70)
 
         return {
-            "concept_pool": concept_pool,
+            "action_pool":     action_pool,
+            "scene_pool":      scene_pool,
             "training_entries": training_entries,
-            "dataset_info": dataset_info,
+            "dataset_info":    dataset_info,
         }
 
     # ----------------------------------------------------------
@@ -1067,13 +1198,14 @@ class SmolVLACommunityDatasetBuilder:
         concepts: List[dict],
         num_frames: int,
         num_concepts: int,
+        concept_key: str = "action_concept_id",
     ) -> np.ndarray:
         """프레임별 활성 concept binary vector [num_frames, num_concepts]"""
         labels = np.zeros((num_frames, num_concepts), dtype=np.float32)
         for c in concepts:
-            cid = c.get("concept_id", 0)
+            cid   = c.get(concept_key, 0)
             start = c.get("start_frame", 0)
-            end = min(c.get("end_frame", num_frames), num_frames)
+            end   = min(c.get("end_frame", num_frames), num_frames)
             if 0 <= cid < num_concepts and start < end:
                 labels[start:end, cid] = 1.0
         return labels

@@ -1,0 +1,82 @@
+[
+  {
+    "concept_id": 0,
+    "concept_type": "scene",
+    "name": "black_colored_object",
+    "description": "black colored object",
+    "frequency": 107,
+    "frequency_pct": 33.0,
+    "cluster_size": 2,
+    "variants": ["blue colored object", "black colored object"]
+  },
+  {
+    "concept_id": 1,
+    "concept_type": "scene",
+    "name": "square_shaped_object",
+    "description": "square shaped object",
+    "frequency": 59,
+    "frequency_pct": 18.2,
+    "cluster_size": 2,
+    "variants": ["cube shaped object", "square shaped object"]
+  },
+  {
+    "concept_id": 2,
+    "concept_type": "scene",
+    "name": "cylindrical_shaped_object",
+    "description": "cylindrical shaped object",
+    "frequency": 49,
+    "frequency_pct": 15.1,
+    "cluster_size": 1,
+    "variants": ["cylindrical shaped object"]
+  },
+  {
+    "concept_id": 3,
+    "concept_type": "scene",
+    "name": "object_on_left_side",
+    "description": "object on left side",
+    "frequency": 26,
+    "frequency_pct": 8.0,
+    "cluster_size": 1,
+    "variants": ["object on left side"]
+  },
+  {
+    "concept_id": 4,
+    "concept_type": "scene",
+    "name": "object_on_the_table",
+    "description": "object on the table",
+    "frequency": 4,
+    "frequency_pct": 1.2,
+    "cluster_size": 1,
+    "variants": ["object on the table"]
+  },
+  {
+    "concept_id": 5,
+    "concept_type": "scene",
+    "name": "object_near_the_gripper",
+    "description": "object near the gripper",
+    "frequency": 52,
+    "frequency_pct": 16.0,
+    "cluster_size": 1,
+    "variants": ["object near the gripper"]
+  },
+  {
+    "concept_id": 6,
+    "concept_type": "scene",
+    "name": "object_near_the_bin",
+    "description": "object near the bin",
+    "frequency": 3,
+    "frequency_pct": 0.9,
+    "cluster_size": 1,
+    "variants": ["object near the bin"]
+  },
+  {
+    "concept_id": 7,
+    "concept_type": "scene",
+    "name": "object_at_center_of",
+    "description": "object at center of workspace",
+    "frequency": 20,
+    "frequency_pct": 6.2,
+    "cluster_size": 1,
+    "variants": ["object at center of workspace"]
+  }
+]

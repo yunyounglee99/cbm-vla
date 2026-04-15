@@ -1,0 +1,1322 @@
+[
+  {
+    "episode_id": 0,
+    "task_description": "Grasp a battery and put it in the bin.",
+    "total_frames": 554,
+    "segments": [
+      {
+        "segment_id": 0,
+        "start_frame": 0,
+        "end_frame": 63,
+        "representative_frame": 31,
+        "trigger": "start",
+        "duration_frames": 63,
+        "gripper_state": "open",
+        "mean_velocity": 0.0,
+        "dominant_direction": "stationary"
+      },
+      {
+        "segment_id": 1,
+        "start_frame": 63,
+        "end_frame": 128,
+        "representative_frame": 95,
+        "trigger": "direction",
+        "duration_frames": 65,
+        "gripper_state": "open",
+        "mean_velocity": 0.8359683156013489,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 2,
+        "start_frame": 128,
+        "end_frame": 148,
+        "representative_frame": 138,
+        "trigger": "gripper",
+        "duration_frames": 20,
+        "gripper_state": "transitioning",
+        "mean_velocity": 3.251225233078003,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 3,
+        "start_frame": 148,
+        "end_frame": 206,
+        "representative_frame": 177,
+        "trigger": "gripper",
+        "duration_frames": 58,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.4352130889892578,
+        "dominant_direction": "rotate_ccw"
+      },
+      {
+        "segment_id": 4,
+        "start_frame": 206,
+        "end_frame": 221,
+        "representative_frame": 213,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.08627104014158249,
+        "dominant_direction": "rotate_ccw"
+      },
+      {
+        "segment_id": 5,
+        "start_frame": 221,
+        "end_frame": 327,
+        "representative_frame": 274,
+        "trigger": "gripper",
+        "duration_frames": 106,
+        "gripper_state": "open",
+        "mean_velocity": 0.9565632939338684,
+        "dominant_direction": "rotate_cw"
+      },
+      {
+        "segment_id": 6,
+        "start_frame": 327,
+        "end_frame": 358,
+        "representative_frame": 342,
+        "trigger": "gripper",
+        "duration_frames": 31,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.38596394658088684,
+        "dominant_direction": "wrist_up"
+      },
+      {
+        "segment_id": 7,
+        "start_frame": 358,
+        "end_frame": 481,
+        "representative_frame": 419,
+        "trigger": "gripper",
+        "duration_frames": 123,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.2974220514297485,
+        "dominant_direction": "up"
+      },
+      {
+        "segment_id": 8,
+        "start_frame": 481,
+        "end_frame": 554,
+        "representative_frame": 517,
+        "trigger": "gripper",
+        "duration_frames": 73,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.0,
+        "dominant_direction": "stationary"
+      }
+    ],
+    "dataset_name": "00ri/so100_battery",
+    "fps": 30,
+    "robot_type": "so100",
+    "contributor": "00ri"
+  },
+  {
+    "episode_id": 1,
+    "task_description": "Grasp a battery and put it in the bin.",
+    "total_frames": 530,
+    "segments": [
+      {
+        "segment_id": 0,
+        "start_frame": 0,
+        "end_frame": 84,
+        "representative_frame": 42,
+        "trigger": "start",
+        "duration_frames": 84,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.831867516040802,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 1,
+        "start_frame": 84,
+        "end_frame": 108,
+        "representative_frame": 96,
+        "trigger": "gripper",
+        "duration_frames": 24,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.9502665996551514,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 2,
+        "start_frame": 108,
+        "end_frame": 150,
+        "representative_frame": 129,
+        "trigger": "gripper",
+        "duration_frames": 42,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.1433380842208862,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 3,
+        "start_frame": 150,
+        "end_frame": 167,
+        "representative_frame": 158,
+        "trigger": "gripper",
+        "duration_frames": 17,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.2595040202140808,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 4,
+        "start_frame": 167,
+        "end_frame": 182,
+        "representative_frame": 174,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.13664855062961578,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 5,
+        "start_frame": 182,
+        "end_frame": 280,
+        "representative_frame": 231,
+        "trigger": "gripper",
+        "duration_frames": 98,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.0833138227462769,
+        "dominant_direction": "backward"
+      },
+      {
+        "segment_id": 6,
+        "start_frame": 280,
+        "end_frame": 299,
+        "representative_frame": 289,
+        "trigger": "gripper",
+        "duration_frames": 19,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.35781431198120117,
+        "dominant_direction": "wrist_up"
+      },
+      {
+        "segment_id": 7,
+        "start_frame": 299,
+        "end_frame": 324,
+        "representative_frame": 311,
+        "trigger": "gripper",
+        "duration_frames": 25,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.5295343399047852,
+        "dominant_direction": "forward"
+      },
+      {
+        "segment_id": 8,
+        "start_frame": 324,
+        "end_frame": 343,
+        "representative_frame": 333,
+        "trigger": "gripper",
+        "duration_frames": 19,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.9364746809005737,
+        "dominant_direction": "forward"
+      },
+      {
+        "segment_id": 9,
+        "start_frame": 343,
+        "end_frame": 432,
+        "representative_frame": 387,
+        "trigger": "gripper",
+        "duration_frames": 89,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.7004233598709106,
+        "dominant_direction": "forward"
+      },
+      {
+        "segment_id": 10,
+        "start_frame": 432,
+        "end_frame": 530,
+        "representative_frame": 481,
+        "trigger": "direction",
+        "duration_frames": 98,
+        "gripper_state": "open",
+        "mean_velocity": 0.13310575485229492,
+        "dominant_direction": "right"
+      }
+    ],
+    "dataset_name": "00ri/so100_battery",
+    "fps": 30,
+    "robot_type": "so100",
+    "contributor": "00ri"
+  },
+  {
+    "episode_id": 2,
+    "task_description": "Grasp a battery and put it in the bin.",
+    "total_frames": 413,
+    "segments": [
+      {
+        "segment_id": 0,
+        "start_frame": 0,
+        "end_frame": 20,
+        "representative_frame": 10,
+        "trigger": "start",
+        "duration_frames": 20,
+        "gripper_state": "open",
+        "mean_velocity": 0.00462582241743803,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 1,
+        "start_frame": 20,
+        "end_frame": 45,
+        "representative_frame": 32,
+        "trigger": "gripper",
+        "duration_frames": 25,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.40688633918762207,
+        "dominant_direction": "backward"
+      },
+      {
+        "segment_id": 2,
+        "start_frame": 45,
+        "end_frame": 66,
+        "representative_frame": 55,
+        "trigger": "velocity",
+        "duration_frames": 21,
+        "gripper_state": "open",
+        "mean_velocity": 3.1129579544067383,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 3,
+        "start_frame": 66,
+        "end_frame": 81,
+        "representative_frame": 73,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 2.051818370819092,
+        "dominant_direction": "rotate_ccw"
+      },
+      {
+        "segment_id": 4,
+        "start_frame": 81,
+        "end_frame": 96,
+        "representative_frame": 88,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.293475866317749,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 5,
+        "start_frame": 96,
+        "end_frame": 123,
+        "representative_frame": 109,
+        "trigger": "gripper",
+        "duration_frames": 27,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.8455387949943542,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 6,
+        "start_frame": 123,
+        "end_frame": 138,
+        "representative_frame": 130,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.31566980481147766,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 7,
+        "start_frame": 138,
+        "end_frame": 218,
+        "representative_frame": 178,
+        "trigger": "gripper",
+        "duration_frames": 80,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.1250804662704468,
+        "dominant_direction": "backward"
+      },
+      {
+        "segment_id": 8,
+        "start_frame": 218,
+        "end_frame": 244,
+        "representative_frame": 231,
+        "trigger": "gripper",
+        "duration_frames": 26,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.4334697425365448,
+        "dominant_direction": "up"
+      },
+      {
+        "segment_id": 9,
+        "start_frame": 244,
+        "end_frame": 413,
+        "representative_frame": 328,
+        "trigger": "gripper",
+        "duration_frames": 169,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.0984470844268799,
+        "dominant_direction": "up"
+      }
+    ],
+    "dataset_name": "00ri/so100_battery",
+    "fps": 30,
+    "robot_type": "so100",
+    "contributor": "00ri"
+  },
+  {
+    "episode_id": 3,
+    "task_description": "Grasp a battery and put it in the bin.",
+    "total_frames": 427,
+    "segments": [
+      {
+        "segment_id": 0,
+        "start_frame": 0,
+        "end_frame": 126,
+        "representative_frame": 63,
+        "trigger": "start",
+        "duration_frames": 126,
+        "gripper_state": "open",
+        "mean_velocity": 0.7110821008682251,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 1,
+        "start_frame": 126,
+        "end_frame": 159,
+        "representative_frame": 142,
+        "trigger": "gripper",
+        "duration_frames": 33,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.2028493881225586,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 2,
+        "start_frame": 159,
+        "end_frame": 283,
+        "representative_frame": 221,
+        "trigger": "gripper",
+        "duration_frames": 124,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.0870683193206787,
+        "dominant_direction": "backward"
+      },
+      {
+        "segment_id": 3,
+        "start_frame": 283,
+        "end_frame": 298,
+        "representative_frame": 290,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.3632521331310272,
+        "dominant_direction": "rotate_cw"
+      },
+      {
+        "segment_id": 4,
+        "start_frame": 298,
+        "end_frame": 427,
+        "representative_frame": 362,
+        "trigger": "gripper",
+        "duration_frames": 129,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.5130146741867065,
+        "dominant_direction": "up"
+      }
+    ],
+    "dataset_name": "00ri/so100_battery_bin_center",
+    "fps": 30,
+    "robot_type": "so100",
+    "contributor": "00ri"
+  },
+  {
+    "episode_id": 4,
+    "task_description": "Grasp a battery and put it in the bin.",
+    "total_frames": 383,
+    "segments": [
+      {
+        "segment_id": 0,
+        "start_frame": 0,
+        "end_frame": 44,
+        "representative_frame": 22,
+        "trigger": "start",
+        "duration_frames": 44,
+        "gripper_state": "open",
+        "mean_velocity": 0.07387402653694153,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 1,
+        "start_frame": 44,
+        "end_frame": 121,
+        "representative_frame": 82,
+        "trigger": "direction",
+        "duration_frames": 77,
+        "gripper_state": "open",
+        "mean_velocity": 1.2958067655563354,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 2,
+        "start_frame": 121,
+        "end_frame": 137,
+        "representative_frame": 129,
+        "trigger": "gripper",
+        "duration_frames": 16,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.424407720565796,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 3,
+        "start_frame": 137,
+        "end_frame": 152,
+        "representative_frame": 144,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.6720165014266968,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 4,
+        "start_frame": 152,
+        "end_frame": 240,
+        "representative_frame": 196,
+        "trigger": "gripper",
+        "duration_frames": 88,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.3136990070343018,
+        "dominant_direction": "backward"
+      },
+      {
+        "segment_id": 5,
+        "start_frame": 240,
+        "end_frame": 260,
+        "representative_frame": 250,
+        "trigger": "gripper",
+        "duration_frames": 20,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.32885226607322693,
+        "dominant_direction": "rotate_cw"
+      },
+      {
+        "segment_id": 6,
+        "start_frame": 260,
+        "end_frame": 383,
+        "representative_frame": 321,
+        "trigger": "gripper",
+        "duration_frames": 123,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.567020058631897,
+        "dominant_direction": "up"
+      }
+    ],
+    "dataset_name": "00ri/so100_battery_bin_center",
+    "fps": 30,
+    "robot_type": "so100",
+    "contributor": "00ri"
+  },
+  {
+    "episode_id": 5,
+    "task_description": "Grasp a battery and put it in the bin.",
+    "total_frames": 416,
+    "segments": [
+      {
+        "segment_id": 0,
+        "start_frame": 0,
+        "end_frame": 59,
+        "representative_frame": 29,
+        "trigger": "start",
+        "duration_frames": 59,
+        "gripper_state": "open",
+        "mean_velocity": 1.3872047662734985,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 1,
+        "start_frame": 59,
+        "end_frame": 74,
+        "representative_frame": 66,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.865013837814331,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 2,
+        "start_frame": 74,
+        "end_frame": 103,
+        "representative_frame": 88,
+        "trigger": "gripper",
+        "duration_frames": 29,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.4900625944137573,
+        "dominant_direction": "rotate_cw"
+      },
+      {
+        "segment_id": 3,
+        "start_frame": 103,
+        "end_frame": 118,
+        "representative_frame": 110,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.5514849424362183,
+        "dominant_direction": "wrist_down"
+      },
+      {
+        "segment_id": 4,
+        "start_frame": 118,
+        "end_frame": 221,
+        "representative_frame": 169,
+        "trigger": "gripper",
+        "duration_frames": 103,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.30552077293396,
+        "dominant_direction": "rotate_ccw"
+      },
+      {
+        "segment_id": 5,
+        "start_frame": 221,
+        "end_frame": 244,
+        "representative_frame": 232,
+        "trigger": "gripper",
+        "duration_frames": 23,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.30331751704216003,
+        "dominant_direction": "rotate_cw"
+      },
+      {
+        "segment_id": 6,
+        "start_frame": 244,
+        "end_frame": 416,
+        "representative_frame": 330,
+        "trigger": "gripper",
+        "duration_frames": 172,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.9674424529075623,
+        "dominant_direction": "up"
+      }
+    ],
+    "dataset_name": "00ri/so100_battery_bin_center",
+    "fps": 30,
+    "robot_type": "so100",
+    "contributor": "00ri"
+  },
+  {
+    "episode_id": 6,
+    "task_description": "toffee_blue",
+    "total_frames": 597,
+    "segments": [
+      {
+        "segment_id": 0,
+        "start_frame": 0,
+        "end_frame": 63,
+        "representative_frame": 31,
+        "trigger": "start",
+        "duration_frames": 63,
+        "gripper_state": "open",
+        "mean_velocity": 0.002004775917157531,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 1,
+        "start_frame": 63,
+        "end_frame": 147,
+        "representative_frame": 105,
+        "trigger": "direction",
+        "duration_frames": 84,
+        "gripper_state": "open",
+        "mean_velocity": 1.6750200986862183,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 2,
+        "start_frame": 147,
+        "end_frame": 162,
+        "representative_frame": 154,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.8045979142189026,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 3,
+        "start_frame": 162,
+        "end_frame": 177,
+        "representative_frame": 169,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.6214343905448914,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 4,
+        "start_frame": 177,
+        "end_frame": 203,
+        "representative_frame": 190,
+        "trigger": "gripper",
+        "duration_frames": 26,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.7007257342338562,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 5,
+        "start_frame": 203,
+        "end_frame": 298,
+        "representative_frame": 250,
+        "trigger": "gripper",
+        "duration_frames": 95,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.3728712797164917,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 6,
+        "start_frame": 298,
+        "end_frame": 323,
+        "representative_frame": 310,
+        "trigger": "gripper",
+        "duration_frames": 25,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.31350234150886536,
+        "dominant_direction": "forward"
+      },
+      {
+        "segment_id": 7,
+        "start_frame": 323,
+        "end_frame": 353,
+        "representative_frame": 338,
+        "trigger": "gripper",
+        "duration_frames": 30,
+        "gripper_state": "transitioning",
+        "mean_velocity": 2.2739641666412354,
+        "dominant_direction": "up"
+      },
+      {
+        "segment_id": 8,
+        "start_frame": 353,
+        "end_frame": 597,
+        "representative_frame": 475,
+        "trigger": "gripper",
+        "duration_frames": 244,
+        "gripper_state": "open",
+        "mean_velocity": 0.38380494713783264,
+        "dominant_direction": "forward"
+      }
+    ],
+    "dataset_name": "0x00raghu/toffee_blue",
+    "fps": 30,
+    "robot_type": "so100",
+    "contributor": "0x00raghu"
+  },
+  {
+    "episode_id": 7,
+    "task_description": "toffee_blue",
+    "total_frames": 597,
+    "segments": [
+      {
+        "segment_id": 0,
+        "start_frame": 0,
+        "end_frame": 148,
+        "representative_frame": 74,
+        "trigger": "start",
+        "duration_frames": 148,
+        "gripper_state": "open",
+        "mean_velocity": 0.9770910739898682,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 1,
+        "start_frame": 148,
+        "end_frame": 163,
+        "representative_frame": 155,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.6273157000541687,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 2,
+        "start_frame": 163,
+        "end_frame": 214,
+        "representative_frame": 188,
+        "trigger": "gripper",
+        "duration_frames": 51,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.9437819123268127,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 3,
+        "start_frame": 214,
+        "end_frame": 241,
+        "representative_frame": 227,
+        "trigger": "direction",
+        "duration_frames": 27,
+        "gripper_state": "closed",
+        "mean_velocity": 0.587700366973877,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 4,
+        "start_frame": 241,
+        "end_frame": 258,
+        "representative_frame": 249,
+        "trigger": "gripper",
+        "duration_frames": 17,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.27761879563331604,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 5,
+        "start_frame": 258,
+        "end_frame": 273,
+        "representative_frame": 265,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.30916470289230347,
+        "dominant_direction": "left"
+      },
+      {
+        "segment_id": 6,
+        "start_frame": 273,
+        "end_frame": 371,
+        "representative_frame": 322,
+        "trigger": "gripper",
+        "duration_frames": 98,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.335760474205017,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 7,
+        "start_frame": 371,
+        "end_frame": 398,
+        "representative_frame": 384,
+        "trigger": "gripper",
+        "duration_frames": 27,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.5159184336662292,
+        "dominant_direction": "up"
+      },
+      {
+        "segment_id": 8,
+        "start_frame": 398,
+        "end_frame": 597,
+        "representative_frame": 497,
+        "trigger": "gripper",
+        "duration_frames": 199,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.9479336738586426,
+        "dominant_direction": "up"
+      }
+    ],
+    "dataset_name": "0x00raghu/toffee_blue",
+    "fps": 30,
+    "robot_type": "so100",
+    "contributor": "0x00raghu"
+  },
+  {
+    "episode_id": 8,
+    "task_description": "toffee_blue",
+    "total_frames": 597,
+    "segments": [
+      {
+        "segment_id": 0,
+        "start_frame": 0,
+        "end_frame": 132,
+        "representative_frame": 66,
+        "trigger": "start",
+        "duration_frames": 132,
+        "gripper_state": "open",
+        "mean_velocity": 0.9207050204277039,
+        "dominant_direction": "backward"
+      },
+      {
+        "segment_id": 1,
+        "start_frame": 132,
+        "end_frame": 147,
+        "representative_frame": 139,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.3007830381393433,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 2,
+        "start_frame": 147,
+        "end_frame": 162,
+        "representative_frame": 154,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.1733720302581787,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 3,
+        "start_frame": 162,
+        "end_frame": 206,
+        "representative_frame": 184,
+        "trigger": "gripper",
+        "duration_frames": 44,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.947875440120697,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 4,
+        "start_frame": 206,
+        "end_frame": 221,
+        "representative_frame": 213,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.2734575867652893,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 5,
+        "start_frame": 221,
+        "end_frame": 328,
+        "representative_frame": 274,
+        "trigger": "gripper",
+        "duration_frames": 107,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.3596420288085938,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 6,
+        "start_frame": 328,
+        "end_frame": 352,
+        "representative_frame": 340,
+        "trigger": "gripper",
+        "duration_frames": 24,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.31726670265197754,
+        "dominant_direction": "wrist_up"
+      },
+      {
+        "segment_id": 7,
+        "start_frame": 352,
+        "end_frame": 447,
+        "representative_frame": 399,
+        "trigger": "gripper",
+        "duration_frames": 95,
+        "gripper_state": "transitioning",
+        "mean_velocity": 2.0356528759002686,
+        "dominant_direction": "up"
+      },
+      {
+        "segment_id": 8,
+        "start_frame": 447,
+        "end_frame": 462,
+        "representative_frame": 454,
+        "trigger": "direction",
+        "duration_frames": 15,
+        "gripper_state": "open",
+        "mean_velocity": 0.6905996203422546,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 9,
+        "start_frame": 462,
+        "end_frame": 597,
+        "representative_frame": 529,
+        "trigger": "direction",
+        "duration_frames": 135,
+        "gripper_state": "open",
+        "mean_velocity": 0.02892768196761608,
+        "dominant_direction": "left"
+      }
+    ],
+    "dataset_name": "0x00raghu/toffee_blue",
+    "fps": 30,
+    "robot_type": "so100",
+    "contributor": "0x00raghu"
+  },
+  {
+    "episode_id": 9,
+    "task_description": "toffee_blue",
+    "total_frames": 597,
+    "segments": [
+      {
+        "segment_id": 0,
+        "start_frame": 0,
+        "end_frame": 10,
+        "representative_frame": 5,
+        "trigger": "start",
+        "duration_frames": 10,
+        "gripper_state": "open",
+        "mean_velocity": 0.916128396987915,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 1,
+        "start_frame": 10,
+        "end_frame": 25,
+        "representative_frame": 17,
+        "trigger": "direction",
+        "duration_frames": 15,
+        "gripper_state": "open",
+        "mean_velocity": 0.24556390941143036,
+        "dominant_direction": "left"
+      },
+      {
+        "segment_id": 2,
+        "start_frame": 25,
+        "end_frame": 46,
+        "representative_frame": 35,
+        "trigger": "direction",
+        "duration_frames": 21,
+        "gripper_state": "open",
+        "mean_velocity": 0.33238959312438965,
+        "dominant_direction": "left"
+      },
+      {
+        "segment_id": 3,
+        "start_frame": 46,
+        "end_frame": 83,
+        "representative_frame": 64,
+        "trigger": "gripper",
+        "duration_frames": 37,
+        "gripper_state": "transitioning",
+        "mean_velocity": 2.919435977935791,
+        "dominant_direction": "backward"
+      },
+      {
+        "segment_id": 4,
+        "start_frame": 83,
+        "end_frame": 98,
+        "representative_frame": 90,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.795612096786499,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 5,
+        "start_frame": 98,
+        "end_frame": 160,
+        "representative_frame": 129,
+        "trigger": "gripper",
+        "duration_frames": 62,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.6598875522613525,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 6,
+        "start_frame": 160,
+        "end_frame": 175,
+        "representative_frame": 167,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.2535308599472046,
+        "dominant_direction": "rotate_ccw"
+      },
+      {
+        "segment_id": 7,
+        "start_frame": 175,
+        "end_frame": 249,
+        "representative_frame": 212,
+        "trigger": "gripper",
+        "duration_frames": 74,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.9382219314575195,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 8,
+        "start_frame": 249,
+        "end_frame": 264,
+        "representative_frame": 256,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.4024861752986908,
+        "dominant_direction": "forward"
+      },
+      {
+        "segment_id": 9,
+        "start_frame": 264,
+        "end_frame": 279,
+        "representative_frame": 271,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.5425007343292236,
+        "dominant_direction": "up"
+      },
+      {
+        "segment_id": 10,
+        "start_frame": 279,
+        "end_frame": 597,
+        "representative_frame": 438,
+        "trigger": "gripper",
+        "duration_frames": 318,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.4979710280895233,
+        "dominant_direction": "up"
+      }
+    ],
+    "dataset_name": "0x00raghu/toffee_blue_2",
+    "fps": 30,
+    "robot_type": "so100",
+    "contributor": "0x00raghu"
+  },
+  {
+    "episode_id": 10,
+    "task_description": "toffee_blue",
+    "total_frames": 597,
+    "segments": [
+      {
+        "segment_id": 0,
+        "start_frame": 0,
+        "end_frame": 153,
+        "representative_frame": 76,
+        "trigger": "start",
+        "duration_frames": 153,
+        "gripper_state": "open",
+        "mean_velocity": 1.2190028429031372,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 1,
+        "start_frame": 153,
+        "end_frame": 185,
+        "representative_frame": 169,
+        "trigger": "gripper",
+        "duration_frames": 32,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.8405755162239075,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 2,
+        "start_frame": 185,
+        "end_frame": 232,
+        "representative_frame": 208,
+        "trigger": "gripper",
+        "duration_frames": 47,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.4415111243724823,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 3,
+        "start_frame": 232,
+        "end_frame": 247,
+        "representative_frame": 239,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.435962051153183,
+        "dominant_direction": "up"
+      },
+      {
+        "segment_id": 4,
+        "start_frame": 247,
+        "end_frame": 281,
+        "representative_frame": 264,
+        "trigger": "gripper",
+        "duration_frames": 34,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.3842978477478027,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 5,
+        "start_frame": 281,
+        "end_frame": 348,
+        "representative_frame": 314,
+        "trigger": "gripper",
+        "duration_frames": 67,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.4487163722515106,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 6,
+        "start_frame": 348,
+        "end_frame": 363,
+        "representative_frame": 355,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.2197640985250473,
+        "dominant_direction": "rotate_ccw"
+      },
+      {
+        "segment_id": 7,
+        "start_frame": 363,
+        "end_frame": 426,
+        "representative_frame": 394,
+        "trigger": "gripper",
+        "duration_frames": 63,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.5372494459152222,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 8,
+        "start_frame": 426,
+        "end_frame": 444,
+        "representative_frame": 435,
+        "trigger": "gripper",
+        "duration_frames": 18,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.36519885063171387,
+        "dominant_direction": "wrist_up"
+      },
+      {
+        "segment_id": 9,
+        "start_frame": 444,
+        "end_frame": 597,
+        "representative_frame": 520,
+        "trigger": "gripper",
+        "duration_frames": 153,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.1934442520141602,
+        "dominant_direction": "up"
+      }
+    ],
+    "dataset_name": "0x00raghu/toffee_blue_2",
+    "fps": 30,
+    "robot_type": "so100",
+    "contributor": "0x00raghu"
+  },
+  {
+    "episode_id": 11,
+    "task_description": "toffee_blue",
+    "total_frames": 597,
+    "segments": [
+      {
+        "segment_id": 0,
+        "start_frame": 0,
+        "end_frame": 55,
+        "representative_frame": 27,
+        "trigger": "start",
+        "duration_frames": 55,
+        "gripper_state": "open",
+        "mean_velocity": 0.005267038010060787,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 1,
+        "start_frame": 55,
+        "end_frame": 131,
+        "representative_frame": 93,
+        "trigger": "direction",
+        "duration_frames": 76,
+        "gripper_state": "open",
+        "mean_velocity": 2.131945848464966,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 2,
+        "start_frame": 131,
+        "end_frame": 147,
+        "representative_frame": 139,
+        "trigger": "gripper",
+        "duration_frames": 16,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.3183170557022095,
+        "dominant_direction": "rotate_ccw"
+      },
+      {
+        "segment_id": 3,
+        "start_frame": 147,
+        "end_frame": 165,
+        "representative_frame": 156,
+        "trigger": "gripper",
+        "duration_frames": 18,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.7931133508682251,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 4,
+        "start_frame": 165,
+        "end_frame": 215,
+        "representative_frame": 190,
+        "trigger": "gripper",
+        "duration_frames": 50,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.4460306763648987,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 5,
+        "start_frame": 215,
+        "end_frame": 230,
+        "representative_frame": 222,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.14276424050331116,
+        "dominant_direction": "down"
+      },
+      {
+        "segment_id": 6,
+        "start_frame": 230,
+        "end_frame": 317,
+        "representative_frame": 273,
+        "trigger": "gripper",
+        "duration_frames": 87,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.5648757219314575,
+        "dominant_direction": "right"
+      },
+      {
+        "segment_id": 7,
+        "start_frame": 317,
+        "end_frame": 332,
+        "representative_frame": 324,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.4754757583141327,
+        "dominant_direction": "rotate_ccw"
+      },
+      {
+        "segment_id": 8,
+        "start_frame": 332,
+        "end_frame": 347,
+        "representative_frame": 339,
+        "trigger": "gripper",
+        "duration_frames": 15,
+        "gripper_state": "transitioning",
+        "mean_velocity": 1.2823486328125,
+        "dominant_direction": "up"
+      },
+      {
+        "segment_id": 9,
+        "start_frame": 347,
+        "end_frame": 597,
+        "representative_frame": 472,
+        "trigger": "gripper",
+        "duration_frames": 250,
+        "gripper_state": "transitioning",
+        "mean_velocity": 0.6145550012588501,
+        "dominant_direction": "up"
+      }
+    ],
+    "dataset_name": "0x00raghu/toffee_blue_2",
+    "fps": 30,
+    "robot_type": "so100",
+    "contributor": "0x00raghu"
+  }
+]

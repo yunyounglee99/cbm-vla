@@ -1,0 +1,363 @@
+[
+  {
+    "concept_id": 0,
+    "concept_type": "action",
+    "name": "wrist_maintains_stable_orientation",
+    "description": "wrist maintains stable orientation during lifting motion",
+    "frequency": 4,
+    "frequency_pct": 1.2,
+    "cluster_size": 3,
+    "variants": [
+      "wrist maintains stable orientation during lifting motion",
+      "wrist maintains a stable orientation during movement",
+      "wrist maintains stable orientation during movement"
+    ]
+  },
+  {
+    "concept_id": 1,
+    "concept_type": "action",
+    "name": "wrist_maintains_orientation_during",
+    "description": "wrist maintains orientation during downward movement",
+    "frequency": 8,
+    "frequency_pct": 2.3,
+    "cluster_size": 5,
+    "variants": [
+      "wrist maintains a stable orientation during lift",
+      "wrist maintains a stable orientation during descent",
+      "wrist maintains orientation during downward movement",
+      "wrist maintains stable orientation during upward motion",
+      "wrist maintains orientation during upward motion"
+    ]
+  },
+  {
+    "concept_id": 2,
+    "concept_type": "action",
+    "name": "wrist_descends_quickly_toward",
+    "description": "wrist descends quickly toward the target object",
+    "frequency": 5,
+    "frequency_pct": 1.5,
+    "cluster_size": 2,
+    "variants": [
+      "wrist descends quickly toward the target object",
+      "arm descends quickly toward the target object"
+    ]
+  },
+  {
+    "concept_id": 3,
+    "concept_type": "action",
+    "name": "arm_extends_forward_toward",
+    "description": "arm extends forward toward the target object quickly",
+    "frequency": 5,
+    "frequency_pct": 1.5,
+    "cluster_size": 2,
+    "variants": [
+      "arm extends forward toward the target object quickly",
+      "arm extends forward quickly toward the target object"
+    ]
+  },
+  {
+    "concept_id": 4,
+    "concept_type": "action",
+    "name": "arm_retracts_backward_away",
+    "description": "arm retracts backward away from target object",
+    "frequency": 5,
+    "frequency_pct": 1.5,
+    "cluster_size": 4,
+    "variants": [
+      "arm moves backward away from target object",
+      "wrist retracts slightly away from target object",
+      "arm retracts slightly away from target object",
+      "arm retracts backward away from target object"
+    ]
+  },
+  {
+    "concept_id": 5,
+    "concept_type": "action",
+    "name": "wrist_begins_rotating_counter-clockwise",
+    "description": "wrist begins rotating counter-clockwise at a fast speed",
+    "frequency": 7,
+    "frequency_pct": 2.0,
+    "cluster_size": 4,
+    "variants": [
+      "wrist begins to rotate counterclockwise at a fast speed",
+      "wrist begins rotating counter-clockwise at a fast speed",
+      "wrist begins to rotate clockwise at a fast speed",
+      "wrist begins to rotate counterclockwise at moderate speed"
+    ]
+  },
+  {
+    "concept_id": 6,
+    "concept_type": "action",
+    "name": "end_effector_moves_downward",
+    "description": "end effector moves downward toward the target object",
+    "frequency": 9,
+    "frequency_pct": 2.6,
+    "cluster_size": 2,
+    "variants": [
+      "end effector moves downward toward the target object",
+      "end effector moves downward toward target object"
+    ]
+  },
+  {
+    "concept_id": 7,
+    "concept_type": "action",
+    "name": "fingers_prepare_to_close",
+    "description": "fingers prepare to close around the target object",
+    "frequency": 15,
+    "frequency_pct": 4.4,
+    "cluster_size": 3,
+    "variants": [
+      "fingers prepare to close around the object",
+      "fingers prepare to close around target object",
+      "fingers prepare to close around the target object"
+    ]
+  },
+  {
+    "concept_id": 8,
+    "concept_type": "action",
+    "name": "gripper_continues_rotating_clockwise",
+    "description": "gripper continues rotating clockwise at a fast speed",
+    "frequency": 3,
+    "frequency_pct": 0.9,
+    "cluster_size": 3,
+    "variants": [
+      "gripper continues rotating clockwise at a fast speed",
+      "gripper continues rotating at a fast speed",
+      "gripper rotates clockwise at a fast speed"
+    ]
+  },
+  {
+    "concept_id": 9,
+    "concept_type": "action",
+    "name": "wrist_begins_to_move",
+    "description": "wrist begins to move upward at a fast speed",
+    "frequency": 3,
+    "frequency_pct": 0.9,
+    "cluster_size": 3,
+    "variants": [
+      "wrist begins moving upward at a fast speed",
+      "arm begins to move upward at a fast speed",
+      "wrist begins to move upward at a fast speed"
+    ]
+  },
+  {
+    "concept_id": 10,
+    "concept_type": "action",
+    "name": "arm_lowers_the_gripper",
+    "description": "arm lowers the gripper quickly toward target object",
+    "frequency": 8,
+    "frequency_pct": 2.3,
+    "cluster_size": 3,
+    "variants": [
+      "arm lowers the gripper quickly toward target object",
+      "arm lowers the gripper rapidly toward target object",
+      "arm lowers the gripper towards the target object"
+    ]
+  },
+  {
+    "concept_id": 11,
+    "concept_type": "action",
+    "name": "arm_moves_downward_toward",
+    "description": "arm moves downward toward the target object quickly",
+    "frequency": 7,
+    "frequency_pct": 2.0,
+    "cluster_size": 3,
+    "variants": [
+      "arm moves downward toward the target object quickly",
+      "arm moves downward toward the target object",
+      "arm moves downward quickly toward the object"
+    ]
+  },
+  {
+    "concept_id": 12,
+    "concept_type": "action",
+    "name": "end_effector_ascends_away",
+    "description": "end effector ascends away from target object",
+    "frequency": 5,
+    "frequency_pct": 1.5,
+    "cluster_size": 3,
+    "variants": [
+      "end effector ascends away from target object",
+      "end effector ascends vertically away from target object",
+      "end effector ascends away from the target object"
+    ]
+  },
+  {
+    "concept_id": 13,
+    "concept_type": "action",
+    "name": "gripper_begins_moving_toward",
+    "description": "gripper begins moving toward the right at high speed",
+    "frequency": 3,
+    "frequency_pct": 0.9,
+    "cluster_size": 3,
+    "variants": [
+      "gripper begins moving toward the right at high speed",
+      "gripper begins moving toward the right at speed",
+      "gripper begins moving toward the right at a fast speed"
+    ]
+  },
+  {
+    "concept_id": 14,
+    "concept_type": "action",
+    "name": "wrist_rotates_to_align",
+    "description": "wrist rotates to align gripper with target object",
+    "frequency": 5,
+    "frequency_pct": 1.5,
+    "cluster_size": 1,
+    "variants": ["wrist rotates to align gripper with target object"]
+  },
+  {
+    "concept_id": 15,
+    "concept_type": "action",
+    "name": "gripper_maintains_a_firm",
+    "description": "gripper maintains a firm grasp on target object",
+    "frequency": 3,
+    "frequency_pct": 0.9,
+    "cluster_size": 2,
+    "variants": [
+      "gripper maintains a firm grasp on the object",
+      "gripper maintains a firm grasp on target object"
+    ]
+  },
+  {
+    "concept_id": 16,
+    "concept_type": "action",
+    "name": "gripper_opens_wide_in",
+    "description": "gripper opens wide in preparation for grasping",
+    "frequency": 3,
+    "frequency_pct": 0.9,
+    "cluster_size": 2,
+    "variants": [
+      "gripper opens wide in preparation for grasping",
+      "gripper opens quickly in preparation for grasping"
+    ]
+  },
+  {
+    "concept_id": 17,
+    "concept_type": "action",
+    "name": "gripper_descends_quickly_to",
+    "description": "gripper descends quickly to pre-grasp position",
+    "frequency": 3,
+    "frequency_pct": 0.9,
+    "cluster_size": 2,
+    "variants": [
+      "gripper descends quickly to pre-grasp position",
+      "gripper descends to pre-grasp position quickly"
+    ]
+  },
+  {
+    "concept_id": 18,
+    "concept_type": "action",
+    "name": "gripper_opens_its_fingers",
+    "description": "gripper opens its fingers completely to prepare",
+    "frequency": 3,
+    "frequency_pct": 0.9,
+    "cluster_size": 2,
+    "variants": [
+      "gripper opens its fingers wide to prepare",
+      "gripper opens its fingers completely to prepare"
+    ]
+  },
+  {
+    "concept_id": 19,
+    "concept_type": "action",
+    "name": "wrist_orients_the_end",
+    "description": "wrist orients the end effector for grasping",
+    "frequency": 3,
+    "frequency_pct": 0.9,
+    "cluster_size": 1,
+    "variants": ["wrist orients the end effector for grasping"]
+  },
+  {
+    "concept_id": 20,
+    "concept_type": "action",
+    "name": "end_effector_descends_quickly",
+    "description": "end effector descends quickly toward target object",
+    "frequency": 4,
+    "frequency_pct": 1.2,
+    "cluster_size": 1,
+    "variants": ["end effector descends quickly toward target object"]
+  },
+  {
+    "concept_id": 21,
+    "concept_type": "action",
+    "name": "end_effector_descends_quickly_toward",
+    "description": "end effector descends quickly toward the object",
+    "frequency": 4,
+    "frequency_pct": 1.2,
+    "cluster_size": 1,
+    "variants": ["end effector descends quickly toward the object"]
+  },
+  {
+    "concept_id": 22,
+    "concept_type": "action",
+    "name": "gripper_begins_to_open",
+    "description": "gripper begins to open wider gradually",
+    "frequency": 10,
+    "frequency_pct": 2.9,
+    "cluster_size": 1,
+    "variants": ["gripper begins to open wider gradually"]
+  },
+  {
+    "concept_id": 23,
+    "concept_type": "action",
+    "name": "end_effector_rotates_to",
+    "description": "end effector rotates to align with target object",
+    "frequency": 4,
+    "frequency_pct": 1.2,
+    "cluster_size": 1,
+    "variants": ["end effector rotates to align with target object"]
+  },
+  {
+    "concept_id": 24,
+    "concept_type": "action",
+    "name": "wrist_begins_to_rotate",
+    "description": "wrist begins to rotate clockwise direction",
+    "frequency": 3,
+    "frequency_pct": 0.9,
+    "cluster_size": 1,
+    "variants": ["wrist begins to rotate clockwise direction"]
+  },
+  {
+    "concept_id": 25,
+    "concept_type": "action",
+    "name": "wrist_rotates_to_orient",
+    "description": "wrist rotates to orient end effector downward",
+    "frequency": 12,
+    "frequency_pct": 3.5,
+    "cluster_size": 1,
+    "variants": ["wrist rotates to orient end effector downward"]
+  },
+  {
+    "concept_id": 26,
+    "concept_type": "action",
+    "name": "gripper_begins_moving_laterally",
+    "description": "gripper begins moving laterally toward the right",
+    "frequency": 3,
+    "frequency_pct": 0.9,
+    "cluster_size": 1,
+    "variants": ["gripper begins moving laterally toward the right"]
+  },
+  {
+    "concept_id": 27,
+    "concept_type": "action",
+    "name": "end_effector_moves_upward",
+    "description": "end effector moves upward at a moderate speed",
+    "frequency": 3,
+    "frequency_pct": 0.9,
+    "cluster_size": 1,
+    "variants": ["end effector moves upward at a moderate speed"]
+  },
+  {
+    "concept_id": 28,
+    "concept_type": "action",
+    "name": "end_effector_rotates_further",
+    "description": "end effector rotates further counterclockwise around its axis",
+    "frequency": 3,
+    "frequency_pct": 0.9,
+    "cluster_size": 1,
+    "variants": [
+      "end effector rotates further counterclockwise around its axis"
+    ]
+  }
+]
