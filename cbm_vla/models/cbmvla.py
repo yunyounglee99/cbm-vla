@@ -418,6 +418,8 @@ class CBMVLA(nn.Module):
         gt_concept_ids: torch.Tensor,
         gt_concept_order: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        reference_scores=None,
+        gt_active_concepts=None,
     ) -> Dict[str, torch.Tensor]:
         """
         Phase 3 Forward: Cross-Attn + Order-Attn + Action Expert 동시 학습
@@ -450,10 +452,12 @@ class CBMVLA(nn.Module):
         # ================================================================
         # 1. Concept Scoring → top-n selection (frozen, no gradient)
         # ================================================================
+        scoring_result = self.concept_scoring(
+            backbone_output.detach(),  # backbone → scoring gradient는 끊음
+            return_matrix=True,
+        )
         with torch.no_grad():
-            scoring_result = self.concept_scoring(
-                backbone_output, return_matrix=True
-            )
+            # top-n selection은 non-differentiable이므로 no_grad 유지
             selected_indices, selected_scores = self.concept_scoring.select_top_n(
                 scoring_result["concept_scores"], n=self.config.top_n_concepts
             )
@@ -565,12 +569,23 @@ class CBMVLA(nn.Module):
         )
         
         # Total loss
+        # Scoring loss (Phase 3에서도 scoring 정확도 유지)
+        scoring_loss, scoring_info = compute_scoring_loss(
+            concept_scores=scoring_result["concept_scores"],
+            concept_probs=scoring_result["concept_probs"],
+            reference_scores=reference_scores,
+            gt_active_concepts=gt_active_concepts,
+            lambda_sim=self.config.lambda_similarity,
+            lambda_bce=self.config.lambda_activation_bce,
+            lambda_sparsity=self.config.lambda_sparsity,
+        )
+
         total_loss = (
             flow_loss
             + self.config.lambda_order * order_loss
             + self.config.lambda_contrastive * contrastive_loss
-        )
-        
+            + scoring_loss  # 추가
+)
         # ================================================================
         # 9. Info dict
         # ================================================================
@@ -580,6 +595,7 @@ class CBMVLA(nn.Module):
             "loss_flow": flow_loss.item(),
             "loss_order": order_loss.item(),
             "loss_contrastive": contrastive_loss.item(),
+            "loss_scoring": scoring_loss.item(),
             "loss_total": total_loss.item(),
             "n_selected_concepts": n_selected,
         }
@@ -739,6 +755,10 @@ class CBMVLA(nn.Module):
         
         # Concept-to-expert projection
         for p in self.concept_to_expert_proj.parameters():
+            p.requires_grad = True
+            
+        # scoring module도 Phase 3에서 fine-tune -> phase3 에서 좋은 initial state 제공
+        for p in self.concept_scoring.parameters():
             p.requires_grad = True
         
         # Action expert

@@ -53,13 +53,13 @@ from .trainer import (
 
 
 @dataclass
+@dataclass
 class Phase3Config(TrainConfig):
-    """Phase 3 전용 설정"""
     # 모델
     smolvla_model_id: str = "lerobot/smolvla_base"
     phase1_checkpoint: str = "./checkpoints/phase1/final"
     phase2_checkpoint: str = "./checkpoints/phase2/final"
-    concept_pool_path: str = "./data/so101_concept_dataset/concept_pool.json"
+    concept_pool_path: str = "./data/smolvla_concept_dataset/concept_pool.json"
     
     # LoRA
     lora_r: int = 16
@@ -68,80 +68,35 @@ class Phase3Config(TrainConfig):
     lora_target_modules: str = "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
     
     # LR (차별적 학습률)
-    lr_lora: float = 2e-5             # LoRA adapters (VLM backbone)
-    lr_cbm: float = 1e-4              # Cross/Order attention + proj
-    lr_expert: float = 1e-4           # Action expert + projectors
+    lr_lora: float = 2e-5
+    lr_scoring: float = 1e-4      # [수정] scoring fine-tune용 lr 추가
+    lr_cbm: float = 1e-4
+    lr_expert: float = 1e-4
     
     # Phase 3 하이퍼파라미터
     epochs: int = 30
     warmup_steps: int = 1000
     
-    # Loss weights
+    # Loss weights (action 계열)
     lambda_order: float = 0.1
     lambda_contrastive: float = 0.05
     contrastive_temperature: float = 0.1
+    
+    # Loss weights (scoring 계열)            # [수정] Phase 3에서도 scoring loss 사용
+    lambda_similarity: float = 0.3
+    lambda_activation_bce: float = 1.0
+    lambda_sparsity: float = 0.1
     
     # Flow matching
     beta_alpha: float = 0.5
     beta_beta: float = 0.5
     
-    # 출력
     output_dir: str = "./checkpoints/phase3"
 
 
-# ================================================================
-# LoRA Setup
-# ================================================================
-
-def setup_lora(model, config: Phase3Config):
-    """
-    VLM Backbone에 LoRA 적용
-    
-    SmolVLA의 finetuning.py 패턴을 따르되,
-    CBM-VLA의 Phase 3에 맞게 조정합니다.
-    """
-    try:
-        from peft import LoraConfig, get_peft_model
-    except ImportError:
-        print("  [WARNING] peft not installed. Skipping LoRA setup.")
-        print("  Install: pip install peft")
-        return model
-    
-    if model.vlm_backbone is None:
-        print("  [WARNING] VLM backbone not loaded, skipping LoRA")
-        return model
-    
-    target_modules = [m.strip() for m in config.lora_target_modules.split(",")]
-    
-    lora_config = LoraConfig(
-        r=config.lora_r,
-        lora_alpha=config.lora_alpha,
-        target_modules=target_modules,
-        lora_dropout=config.lora_dropout,
-        bias="none",
-        task_type="FEATURE_EXTRACTION",
-    )
-    
-    # VLM 내부 모델에 LoRA 적용
-    model.vlm_backbone.vlm = get_peft_model(model.vlm_backbone.vlm, lora_config)
-    
-    print(f"  LoRA applied: r={config.lora_r}, alpha={config.lora_alpha}")
-    print(f"  Target modules: {target_modules}")
-    model.vlm_backbone.vlm.print_trainable_parameters()
-    
-    return model
-
-
 def build_optimizer(model, config: Phase3Config) -> AdamW:
-    """
-    차별적 학습률을 적용한 optimizer 생성
-    
-    3개 파라미터 그룹:
-      1. LoRA params → lr_lora (가장 낮음)
-      2. CBM 모듈 params (cross/order attn, proj) → lr_cbm
-      3. Action expert + projectors → lr_expert
-    """
     lora_params = []
+    scoring_params = []                                    # [수정] scoring 그룹 추가
     cbm_params = []
     expert_params = []
     
@@ -151,6 +106,8 @@ def build_optimizer(model, config: Phase3Config) -> AdamW:
         
         if "lora" in name.lower():
             lora_params.append(param)
+        elif "concept_scoring" in name:                    # [수정] scoring 분리
+            scoring_params.append(param)
         elif any(k in name for k in [
             "concept_cross_attn", "concept_order_attn",
             "concept_to_expert_proj", "contrastive_proj",
@@ -162,23 +119,22 @@ def build_optimizer(model, config: Phase3Config) -> AdamW:
     param_groups = []
     if lora_params:
         param_groups.append({"params": lora_params, "lr": config.lr_lora})
+    if scoring_params:                                     # [수정] scoring 그룹
+        param_groups.append({"params": scoring_params, "lr": config.lr_scoring})
     if cbm_params:
         param_groups.append({"params": cbm_params, "lr": config.lr_cbm})
     if expert_params:
         param_groups.append({"params": expert_params, "lr": config.lr_expert})
     
     print(f"  Optimizer groups: LoRA={len(lora_params)}, "
+          f"Scoring={len(scoring_params)}, "                # [수정] 로깅 추가
           f"CBM={len(cbm_params)}, Expert={len(expert_params)}")
     
     return AdamW(param_groups, weight_decay=config.weight_decay, betas=config.betas)
 
 
-# ================================================================
-# Phase 3 Trainer
-# ================================================================
-
 def train_phase3(
-    model,   # CBMVLA instance (Phase 1+2 로드, LoRA 적용 완료)
+    model,
     train_dataloader: DataLoader,
     config: Phase3Config,
     eval_dataloader: Optional[DataLoader] = None,
@@ -196,27 +152,31 @@ def train_phase3(
               "actions_gt": [B, chunk_size, action_dim]
               "gt_concept_ids": [B, top_n]
               "gt_concept_order": [B, top_n]
+              "reference_scores": [B, num_concepts]       # [수정] scoring용 추가
+              "gt_active_concepts": [B, num_concepts]     # [수정] scoring용 추가
         config: Phase3Config
         eval_dataloader: 검증 데이터 로더 (선택)
     """
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
     set_seed(config.seed)
     
-    # Phase 3 설정 + LoRA
     model.configure_phase3()
     model = setup_lora(model, config)
     model = model.to(device)
     
     trainable, total = count_parameters(model)
     print(f"\n{'='*60}")
-    print(f"Phase 3: End-to-End Training with LoRA")
+    print(f"Phase 3: End-to-End Training with LoRA + Scoring Fine-tune")  # [수정]
     print(f"  Trainable: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
-    print(f"  LR: lora={config.lr_lora}, cbm={config.lr_cbm}, expert={config.lr_expert}")
-    print(f"  Loss: flow + {config.lambda_order}*order + "
+    print(f"  LR: lora={config.lr_lora}, scoring={config.lr_scoring}, "   # [수정]
+          f"cbm={config.lr_cbm}, expert={config.lr_expert}")
+    print(f"  Action loss: flow + {config.lambda_order}*order + "
           f"{config.lambda_contrastive}*contrastive")
+    print(f"  Scoring loss: {config.lambda_similarity}*sim + "            # [수정]
+          f"{config.lambda_activation_bce}*bce + "
+          f"{config.lambda_sparsity}*sparsity")
     print(f"{'='*60}\n")
     
-    # Optimizer (차별적 LR)
     optimizer = build_optimizer(model, config)
     
     total_steps = len(train_dataloader) * config.epochs // config.gradient_accumulation_steps
@@ -225,29 +185,24 @@ def train_phase3(
     logger = TrainLogger(config, "Phase3")
     ckpt_mgr = CheckpointManager(config.output_dir, config.save_total_limit)
     
-    # Resume
     start_step, start_epoch = 0, 0
     if config.resume_from:
         meta = ckpt_mgr.load(model, optimizer, scheduler, config.resume_from)
         start_step, start_epoch = meta["step"], meta["epoch"]
     
-    # Mixed precision
     use_amp = config.dtype in ("float16", "bfloat16") and torch.cuda.is_available()
     scaler = torch.amp.GradScaler("cuda", enabled=(config.dtype == "float16"))
     amp_dtype = get_torch_dtype(config.dtype) if use_amp else torch.float32
     
-    # Training loop
     global_step = start_step
     model.train()
     
-    # Vision encoder는 항상 eval
     if model.vision_encoder is not None:
         model.vision_encoder.eval()
     
     for epoch in range(start_epoch, config.epochs):
         for batch_idx, batch in enumerate(train_dataloader):
             
-            # 데이터 이동
             backbone_output = batch["backbone_output"].to(device)
             vlm_features = batch["vlm_features"].to(device)
             actions_gt = batch["actions_gt"].to(device)
@@ -257,7 +212,14 @@ def train_phase3(
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
             
-            # Forward with AMP
+            # [수정] scoring용 데이터 추출
+            reference_scores = batch.get("reference_scores")
+            if reference_scores is not None:
+                reference_scores = reference_scores.to(device)
+            gt_active_concepts = batch.get("gt_active_concepts")
+            if gt_active_concepts is not None:
+                gt_active_concepts = gt_active_concepts.to(device)
+            
             with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 result = model.forward_phase3(
                     backbone_output=backbone_output,
@@ -266,6 +228,8 @@ def train_phase3(
                     gt_concept_ids=gt_concept_ids,
                     gt_concept_order=gt_concept_order,
                     attention_mask=attention_mask,
+                    reference_scores=reference_scores,          # [수정]
+                    gt_active_concepts=gt_active_concepts,      # [수정]
                 )
                 loss = result["loss"] / config.gradient_accumulation_steps
             
@@ -280,7 +244,6 @@ def train_phase3(
                 optimizer.zero_grad()
                 global_step += 1
                 
-                # 로깅 (lr은 첫 번째 그룹 = lora)
                 current_lr = optimizer.param_groups[0]["lr"]
                 logger.log_step(result["info"], global_step, epoch, current_lr)
                 
@@ -292,7 +255,8 @@ def train_phase3(
                     eval_info = evaluate_phase3(model, eval_dataloader, device)
                     print(f"  [Eval] step={global_step} | "
                           f"loss={eval_info['loss']:.4f} | "
-                          f"flow={eval_info['flow']:.4f}")
+                          f"flow={eval_info['flow']:.4f} | "
+                          f"scoring={eval_info['scoring']:.4f}")       # [수정]
                     model.train()
                     if model.vision_encoder is not None:
                         model.vision_encoder.eval()
@@ -309,25 +273,34 @@ def evaluate_phase3(model, dataloader, device):
     model.eval()
     total_loss = 0
     total_flow = 0
+    total_scoring = 0                                      # [수정]
     count = 0
     
     for batch in dataloader:
+        # [수정] scoring 데이터도 전달
+        reference_scores = batch.get("reference_scores")
+        gt_active_concepts = batch.get("gt_active_concepts")
+        
         result = model.forward_phase3(
             backbone_output=batch["backbone_output"].to(device),
             vlm_features=batch["vlm_features"].to(device),
             gt_actions=batch["actions_gt"].to(device),
             gt_concept_ids=batch["gt_concept_ids"].to(device),
             gt_concept_order=batch["gt_concept_order"].to(device),
-            attention_mask=batch.get("attention_mask", torch.ones(
-                batch["backbone_output"].shape[:2])).to(device),
+            attention_mask=batch.get("attention_mask",
+                torch.ones(batch["backbone_output"].shape[:2])).to(device),
+            reference_scores=reference_scores.to(device) if reference_scores is not None else None,
+            gt_active_concepts=gt_active_concepts.to(device) if gt_active_concepts is not None else None,
         )
         total_loss += result["info"].get("loss_total", 0)
         total_flow += result["info"].get("loss_flow", 0)
+        total_scoring += result["info"].get("loss_scoring", 0)  # [수정]
         count += 1
     
     return {
         "loss": total_loss / max(count, 1),
         "flow": total_flow / max(count, 1),
+        "scoring": total_scoring / max(count, 1),          # [수정]
     }
 
 
